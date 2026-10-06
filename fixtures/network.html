@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>NEXUS fixture: network</title>
+  </head>
+  <body style="font-family: system-ui; margin: 40px">
+    <h1>Network</h1>
+    <!-- Filled by a request that starts on load: only present after network idle. -->
+    <p id="initial"></p>
+    <button type="button" id="load">Load data</button>
+    <p id="result"></p>
+    <script>
+      const wait = new URLSearchParams(location.search).get('initialMs') ?? '600';
+      fetch(`/api/slow?ms=${wait}`)
+        .then((response) => response.json())
+        .then(() => { document.getElementById('initial').textContent = 'Initial data ready'; });
+
+      document.getElementById('load').addEventListener('click', () => {
+        fetch('/api/slow?ms=500')
+          .then((response) => response.json())
+          .then(() => { document.getElementById('result').textContent = 'Data loaded'; });
+      });
+    </script>
+  </body>
+</html>

@@ -215,3 +215,61 @@ describe('matchByRole', () => {
     assert.deepEqual(ids(matchByRole(snapshot, 'link')), ['link']);
   });
 });
+
+describe('DomSnapshot frame stitching', () => {
+  // Main document with an <iframe> (node 3) whose content is documents[1].
+  const strings = ['#document', 'HTML', 'BODY', 'IFRAME', 'BUTTON', '#text', 'Outer', 'Inner', 'visible', 'main-frame', 'child-frame', 'INPUT'];
+  const box = [0, 0, 50, 20];
+  const snapshot = DomSnapshot.fromCdp({
+    strings,
+    documents: [
+      {
+        frameId: 9,
+        nodes: {
+          parentIndex: [-1, 0, 1, 2, 2, 4, 2],
+          nodeType: [9, 1, 1, 1, 1, 3, 1],
+          nodeName: [0, 1, 2, 3, 4, 5, 11],
+          nodeValue: [-1, -1, -1, -1, -1, 6, -1],
+          backendNodeId: [1, 2, 3, 4, 5, 6, 7],
+          attributes: [[], [], [], [], [], [], []],
+          contentDocumentIndex: { index: [3], value: [1] },
+          inputChecked: { index: [6] },
+        },
+        layout: { nodeIndex: [3, 4, 5, 6], bounds: [box, box, box, box], styles: [[8], [8], [8], [8]] },
+      },
+      {
+        frameId: 10,
+        nodes: {
+          parentIndex: [-1, 0, 1, 2, 3],
+          nodeType: [9, 1, 1, 1, 3],
+          nodeName: [0, 1, 2, 4, 5],
+          nodeValue: [-1, -1, -1, -1, 7],
+          backendNodeId: [100, 101, 102, 103, 104],
+          attributes: [[], [], [], [], []],
+        },
+        layout: { nodeIndex: [3, 4], bounds: [box, box], styles: [[8], [8]] },
+      },
+    ],
+  });
+
+  it('places the iframe document under its <iframe> element, in document order', () => {
+    const iframe = snapshot.get(4)!;
+    assert.equal(iframe.children[0]?.tagName, '#document');
+    assert.equal(iframe.children[0]?.backendNodeId, 100);
+    const order = snapshot.nodes.map((node) => node.backendNodeId);
+    assert.deepEqual(order, [1, 2, 3, 4, 100, 101, 102, 103, 104, 5, 6, 7]);
+  });
+
+  it('records the owning frame and live checked state', () => {
+    assert.equal(snapshot.get(5)!.frameId, 'main-frame');
+    assert.equal(snapshot.get(103)!.frameId, 'child-frame');
+    assert.equal(snapshot.get(7)!.checked, true);
+    assert.equal(snapshot.get(5)!.checked, false);
+  });
+
+  it('keeps frame text out of the host document text, but lets locators reach it', () => {
+    assert.equal(snapshot.textContent(snapshot.get(3)!), 'Outer');
+    assert.deepEqual(matchByText(snapshot, 'Inner').map((node) => node.backendNodeId), [103]);
+    assert.deepEqual(matchByRole(snapshot, 'button').map((node) => node.backendNodeId), [103, 5]);
+  });
+});

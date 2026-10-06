@@ -1,5 +1,6 @@
 import { CdpClient } from '../cdp/client.ts';
 import { NexusPage } from '../page/page.ts';
+import { BrowserContext } from './context.ts';
 import { launchChromium, type LaunchedChromium, type LaunchOptions } from './launcher.ts';
 
 export interface TargetInfo {
@@ -8,6 +9,7 @@ export interface TargetInfo {
   title: string;
   url: string;
   attached: boolean;
+  browserContextId?: string;
 }
 
 export interface BrowserVersion {
@@ -25,6 +27,8 @@ export class NexusBrowser {
   readonly #client: CdpClient;
   readonly #chromium: LaunchedChromium | undefined;
   readonly #pages = new Set<NexusPage>();
+  readonly #defaultContext: BrowserContext;
+  readonly #contexts = new Set<BrowserContext>();
   #closed = false;
 
   /** Starts a fresh Chromium (temporary profile) and connects to it. */
@@ -47,6 +51,7 @@ export class NexusBrowser {
   private constructor(client: CdpClient, chromium: LaunchedChromium | undefined) {
     this.#client = client;
     this.#chromium = chromium;
+    this.#defaultContext = new BrowserContext(client, undefined, (contextId) => this.#createPage(contextId));
   }
 
   get connected(): boolean {
@@ -67,8 +72,32 @@ export class NexusBrowser {
     return targetInfos;
   }
 
-  async newPage(): Promise<NexusPage> {
-    const { targetId } = await this.#client.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' });
+  /** Opens a page in the default context (shared cookies/storage with other default pages). */
+  newPage(): Promise<NexusPage> {
+    return this.#defaultContext.newPage();
+  }
+
+  /** Creates an isolated context: its pages share nothing with any other context. */
+  async newContext(): Promise<BrowserContext> {
+    const { browserContextId } = await this.#client.send<{ browserContextId: string }>('Target.createBrowserContext', {
+      // Connected (not launched) browsers clean the context up if NEXUS disconnects.
+      disposeOnDetach: true,
+    });
+    const context = new BrowserContext(this.#client, browserContextId, (contextId) => this.#createPage(contextId));
+    this.#contexts.add(context);
+    return context;
+  }
+
+  /** Open pages across all contexts. */
+  pages(): NexusPage[] {
+    return [...this.#pages];
+  }
+
+  async #createPage(browserContextId: string | undefined): Promise<NexusPage> {
+    const { targetId } = await this.#client.send<{ targetId: string }>('Target.createTarget', {
+      url: 'about:blank',
+      ...(browserContextId ? { browserContextId } : {}),
+    });
     const { sessionId } = await this.#client.send<{ sessionId: string }>('Target.attachToTarget', {
       targetId,
       flatten: true,
@@ -76,10 +105,6 @@ export class NexusBrowser {
     const page: NexusPage = await NexusPage.create(this.#client, targetId, sessionId, () => this.#pages.delete(page));
     this.#pages.add(page);
     return page;
-  }
-
-  pages(): NexusPage[] {
-    return [...this.#pages];
   }
 
   /**
@@ -92,6 +117,7 @@ export class NexusBrowser {
     this.#pages.clear();
 
     if (!this.#chromium) {
+      await Promise.all([...this.#contexts].map((context) => context.close().catch(() => {})));
       this.#client.close();
       return;
     }

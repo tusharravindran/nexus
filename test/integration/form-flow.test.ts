@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import { NexusBrowser } from '../../src/browser/browser.ts';
-import { ActionError, AmbiguousLocatorError, ElementNotFoundError, VerificationError } from '../../src/errors.ts';
+import { AmbiguousLocatorError, ElementCoveredError, ElementNotFoundError, VerificationError } from '../../src/errors.ts';
 import { expect } from '../../src/expect.ts';
 import type { NexusPage } from '../../src/page/page.ts';
 
@@ -114,9 +114,9 @@ describe('Milestone 1 flow: locate → act → observe → verify', () => {
       await assert.rejects(page.locator('#disabled').click({ timeoutMs: 200 }), /is disabled/);
     });
 
-    it('reports an element covered by an overlay, and sends no click', async () => {
-      await assert.rejects(page.locator('#covered').click(), (error: unknown) => {
-        assert.ok(error instanceof ActionError);
+    it('reports an element that stays covered by an overlay, and sends no click', async () => {
+      await assert.rejects(page.locator('#covered').click({ timeoutMs: 300 }), (error: unknown) => {
+        assert.ok(error instanceof ElementCoveredError);
         assert.match(error.message, /covered by <span#overlay\.cover>/);
         return true;
       });

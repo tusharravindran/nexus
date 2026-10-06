@@ -1,0 +1,13 @@
+{
+  "name": "Greet form",
+  "description": "Fill in the name field, submit, and verify the greeting.",
+  "steps": [
+    { "goto": "../../fixtures/form.html" },
+    { "fill": { "target": { "role": "textbox", "name": "Name" }, "value": "Ada Lovelace" } },
+    { "expectValue": { "target": { "role": "textbox", "name": "Name" }, "value": "Ada Lovelace" } },
+    { "click": { "role": "button", "name": "Submit" } },
+    { "expectText": "Success" },
+    { "expectElementText": { "target": { "role": "status" }, "text": "Success: Hello, Ada Lovelace", "exact": true } },
+    { "screenshot": "greeting.png" }
+  ]
+}

@@ -54,3 +54,20 @@ export class ActionError extends NexusError {}
 
 /** An expect() assertion did not hold before its timeout expired. */
 export class VerificationError extends NexusError {}
+
+/**
+ * Another element would receive a click at the target's position (e.g. an
+ * overlay). Locators retry this until their timeout, since overlays are
+ * often transient.
+ */
+export class ElementCoveredError extends ActionError {}
+
+/** A task file is malformed. `issues` lists every problem found, with its location. */
+export class TaskValidationError extends NexusError {
+  readonly issues: string[];
+
+  constructor(issues: string[]) {
+    super(`Invalid task:\n  ${issues.join('\n  ')}`);
+    this.issues = issues;
+  }
+}

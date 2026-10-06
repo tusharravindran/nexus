@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { DomSnapshot } from '../../src/dom/snapshot.ts';
+import { DomSnapshot } from '../../src/dom/snapshot.ts';
 import { ActionError, AmbiguousLocatorError, ElementNotFoundError, ProtocolError } from '../../src/errors.ts';
 import { Locator, type LocatorHost, type LocatorQuery } from '../../src/locator/locator.ts';
 import { byId, h, snapshotOf } from '../helpers/dom.ts';
@@ -258,5 +258,196 @@ describe('Locator.waitFor', () => {
     const locator = new Locator(page, { kind: 'css', selector: '#h' });
     await locator.waitFor({ state: 'attached', timeoutMs: 50 });
     await assert.rejects(locator.waitFor({ state: 'visible', timeoutMs: 50 }), ElementNotFoundError);
+  });
+});
+
+describe('Locator chaining', () => {
+  const sections = () =>
+    snapshotOf(
+      h('section', { id: 'first' }, h('button', { id: 'save-1' }, 'Save')),
+      h('section', { id: 'second' }, h('button', { id: 'save-2' }, 'Save')),
+    );
+
+  it('scopes matches to descendants of the parent locator', async () => {
+    const page = new FakePage(sections());
+    page.css['#second'] = [byId(page.current, 'second').backendNodeId];
+    const scoped = new Locator(page, { kind: 'css', selector: '#second' }).getByRole('button', { name: 'Save' });
+
+    assert.equal(String(scoped), "locator('#second').getByRole('button', { name: 'Save' })");
+    assert.equal(await scoped.count(), 1);
+    await scoped.click();
+    const target = page.calls.find((c) => c.method === 'DOM.scrollIntoViewIfNeeded')!;
+    assert.equal(target.params.backendNodeId, byId(page.current, 'save-2').backendNodeId);
+  });
+
+  it('honors nth on the parent', async () => {
+    const page = new FakePage(sections());
+    const section = byId(page.current, 'first');
+    page.css.section = [section.backendNodeId, byId(page.current, 'second').backendNodeId];
+    const scoped = new Locator(page, { kind: 'css', selector: 'section' }).nth(0).getByText('Save');
+    assert.equal((await scoped.inspect())?.node.attributes.id, 'save-1');
+  });
+
+  it('is still strict across several parent matches', async () => {
+    const page = new FakePage(sections());
+    page.css.section = [byId(page.current, 'first').backendNodeId, byId(page.current, 'second').backendNodeId];
+    await assert.rejects(new Locator(page, { kind: 'css', selector: 'section' }).getByText('Save').click(), AmbiguousLocatorError);
+  });
+});
+
+describe('Locator transient overlays', () => {
+  it('retries a covered click until the overlay goes away', async () => {
+    const page = new FakePage(snapshotOf(h('button', { id: 'b' }, 'Buy'), h('div', { id: 'overlay' })));
+    page.hitTarget = byId(page.current, 'overlay').backendNodeId;
+    setTimeout(() => {
+      page.hitTarget = undefined;
+    }, 120);
+
+    await new Locator(page, role('button', 'Buy')).click({ timeoutMs: 2_000 });
+    const hitTests = page.calls.filter((c) => c.method === 'DOM.getNodeForLocation').length;
+    assert.ok(hitTests >= 2, 'hit-tested again after the first covered attempt');
+    assert.equal(page.calls.filter((c) => c.method === 'Input.dispatchMouseEvent').length, 3, 'clicked exactly once');
+  });
+});
+
+describe('Locator form actions', () => {
+  it('hover moves the pointer without pressing', async () => {
+    const page = new FakePage(snapshotOf(h('button', {}, 'Menu')));
+    await new Locator(page, role('button')).hover();
+    const mouse = page.calls.filter((c) => c.method === 'Input.dispatchMouseEvent').map((c) => c.params.type);
+    assert.deepEqual(mouse, ['mouseMoved']);
+  });
+
+  it('fill selects all with an editor command, then types the new value', async () => {
+    const page = new FakePage(snapshotOf(h('input', { 'aria-label': 'City', 'data-value': 'Paris' })));
+    await new Locator(page, role('textbox', 'City')).fill('Oslo');
+    const keys = page.calls.filter((c) => c.method === 'Input.dispatchKeyEvent').map((c) => c.params);
+    const selectAll = keys.find((k) => Array.isArray(k.commands));
+    assert.deepEqual(selectAll?.commands, ['selectAll']);
+    assert.deepEqual(keys.filter((k) => k.type === 'keyDown').map((k) => k.text), ['O', 's', 'l', 'o']);
+  });
+
+  it('fill with an empty string deletes the selection', async () => {
+    const page = new FakePage(snapshotOf(h('input', { 'aria-label': 'City' })));
+    await new Locator(page, role('textbox')).fill('');
+    const keys = page.calls.filter((c) => c.method === 'Input.dispatchKeyEvent').map((c) => c.params.key);
+    assert.ok(keys.includes('Delete'));
+  });
+
+  it('fill rejects a disabled field', async () => {
+    const page = new FakePage(snapshotOf(h('input', { 'aria-label': 'City', disabled: '' })));
+    await assert.rejects(new Locator(page, role('textbox')).fill('x', { timeoutMs: 80 }), /is disabled/);
+  });
+});
+
+describe('Locator check/uncheck', () => {
+  const box = (checked: boolean) =>
+    snapshotOf(h('input', { id: 'c', type: 'checkbox', 'aria-label': 'Agree', ...(checked ? { 'data-checked': '' } : {}) }));
+
+  it('clicks an unchecked box and verifies it became checked', async () => {
+    const page = new FakePage(box(false));
+    page.responders['Input.dispatchMouseEvent'] = (params) => {
+      if (params.type === 'mouseReleased') page.current = box(true);
+      return {};
+    };
+    await new Locator(page, role('checkbox', 'Agree')).check();
+    assert.equal(page.calls.filter((c) => c.method === 'Input.dispatchMouseEvent').length, 3);
+  });
+
+  it('does nothing when already in the desired state', async () => {
+    const page = new FakePage(box(true));
+    await new Locator(page, role('checkbox')).check();
+    assert.ok(!page.methods().includes('Input.dispatchMouseEvent'));
+  });
+
+  it('fails when the click does not change the state', async () => {
+    const page = new FakePage(box(false));
+    await assert.rejects(new Locator(page, role('checkbox')).check({ timeoutMs: 200 }), /still unchecked/);
+  });
+
+  it('refuses to uncheck a radio and to check a non-checkbox', async () => {
+    const radio = new FakePage(snapshotOf(h('input', { type: 'radio', 'aria-label': 'Small', 'data-checked': '' })));
+    await assert.rejects(new Locator(radio, role('radio')).uncheck(), /radios are unchecked by choosing another option/);
+    const button = new FakePage(snapshotOf(h('button', {}, 'Go')));
+    await assert.rejects(new Locator(button, role('button')).check(), /not a checkbox or radio/);
+  });
+});
+
+describe('Locator selectOption', () => {
+  const select = (attrs: Record<string, string> = {}) =>
+    snapshotOf(
+      h(
+        'select',
+        { id: 's', 'aria-label': 'Color', ...attrs },
+        h('option', { value: 'r' }, 'Red'),
+        h('optgroup', { label: 'Dark' }, h('option', { value: 'db' }, 'Dark blue')),
+        h('option', { value: 'x', disabled: '' }, 'Unavailable'),
+      ),
+    );
+  const colorSelect = (page: FakePage) => new Locator(page, role('combobox', 'Color'));
+
+  function withRuntime(page: FakePage): FakePage {
+    page.responders['DOM.resolveNode'] = () => ({ object: { objectId: 'obj-1' } });
+    return page;
+  }
+
+  it('selects by value or label, counting options inside optgroups', async () => {
+    const page = withRuntime(new FakePage(select()));
+    assert.deepEqual(await colorSelect(page).selectOption('Dark blue'), ['db']);
+    const call = page.calls.find((c) => c.method === 'Runtime.callFunctionOn')!;
+    assert.deepEqual(call.params.arguments, [{ value: [1] }]);
+    assert.ok(page.methods().includes('Runtime.releaseObject'));
+
+    assert.deepEqual(await colorSelect(page).selectOption({ value: 'r' }), ['r']);
+  });
+
+  it('lists the available options when the requested one is missing', async () => {
+    const page = withRuntime(new FakePage(select()));
+    await assert.rejects(colorSelect(page).selectOption('Purple'), (error: unknown) => {
+      assert.ok(error instanceof ActionError);
+      assert.match(error.message, /no option "Purple"/);
+      assert.match(error.message, /"Dark blue" \(value "db"\)/);
+      return true;
+    });
+    assert.ok(!page.methods().includes('Runtime.callFunctionOn'));
+  });
+
+  it('refuses disabled options, multiple values on a single select, and non-selects', async () => {
+    const page = withRuntime(new FakePage(select()));
+    await assert.rejects(colorSelect(page).selectOption('x'), /is disabled/);
+    await assert.rejects(colorSelect(page).selectOption(['r', 'db']), /not a multi-select/);
+    const notSelect = new FakePage(snapshotOf(h('button', {}, 'Go')));
+    await assert.rejects(new Locator(notSelect, role('button')).selectOption('a'), /not a <select>/);
+  });
+
+  it('selects several values in a multi-select', async () => {
+    const page = withRuntime(new FakePage(select({ multiple: '' })));
+    assert.deepEqual(await new Locator(page, role('listbox')).count(), 0, 'multi-select keeps combobox role in this subset');
+    assert.deepEqual(await colorSelect(page).selectOption(['r', 'db']), ['r', 'db']);
+  });
+});
+
+describe('Locator.inputValue', () => {
+  it('reports the selected option for a <select>, which the snapshot has no value for', async () => {
+    const page = new FakePage(snapshotOf(h('select', { 'aria-label': 'Color' }, h('option', { value: 'r' }, 'Red'), h('option', { value: 'g' }, 'Green'))));
+    // Mark "Green" selected the way DOMSnapshot reports it.
+    const raw = page.current.nodes.map((node) => ({
+      backendNodeId: node.backendNodeId,
+      nodeType: node.nodeType,
+      nodeName: node.tagName,
+      nodeValue: node.nodeValue,
+      attributes: { ...node.attributes },
+      selected: node.attributes.value === 'g',
+      parentIndex: node.parent ? node.parent.index : -1,
+      bounds: node.bounds,
+    }));
+    page.current = new DomSnapshot(raw);
+    assert.equal(await new Locator(page, role('combobox')).inputValue(), 'g');
+  });
+
+  it("reports '' for an emptied field, and undefined only when nothing matches", async () => {
+    const page = new FakePage(snapshotOf(h('textarea', { 'aria-label': 'Notes' })));
+    assert.equal(await new Locator(page, role('textbox')).inputValue(), '');
+    assert.equal(await new Locator(page, role('button')).inputValue(), undefined);
   });
 });

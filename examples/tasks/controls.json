@@ -1,0 +1,24 @@
+{
+  "name": "Controls tour",
+  "description": "Exercises Milestone 2 actions: hover, fill, check, select, transient overlays, iframes and shadow DOM.",
+  "steps": [
+    { "goto": "../../fixtures/controls.html" },
+    { "hover": { "role": "button", "name": "Hover me" } },
+    { "expectVisible": { "role": "tooltip" } },
+    { "fill": { "target": { "role": "textbox", "name": "City" }, "value": "Oslo" } },
+    { "check": { "role": "checkbox", "name": "Subscribe" } },
+    { "check": { "role": "radio", "name": "Large" } },
+    { "select": { "target": { "role": "combobox", "name": "Color" }, "option": "Dark blue" } },
+    { "expectElementText": { "target": { "css": "#select-output" }, "text": "color: db" } },
+    { "click": { "role": "button", "name": "Arm overlay" } },
+    { "click": { "role": "button", "name": "Briefly covered" }, "name": "click through a transient overlay" },
+
+    { "goto": "../../fixtures/frames.html" },
+    { "fill": { "target": { "role": "textbox", "name": "Card number", "within": { "css": "iframe#payment" } }, "value": "4242" } },
+    { "click": { "role": "button", "name": "Pay", "within": { "css": "iframe#payment" } } },
+    { "expectElementText": { "target": { "css": "#paid" }, "text": "Paid with 4242" } },
+    { "fill": { "target": { "role": "textbox", "name": "Shadow field" }, "value": "inside" } },
+    { "click": { "css": "#shadow-button" } },
+    { "expectText": "Shadow clicked: inside" }
+  ]
+}

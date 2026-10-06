@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>NEXUS fixture: controls</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 40px; }
+      section { margin: 14px 0; }
+      .cover-wrap { position: relative; display: inline-block; }
+      .cover { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.2); }
+    </style>
+  </head>
+  <body>
+    <h1>Controls</h1>
+
+    <section aria-label="Hover">
+      <button type="button" id="hover-target">Hover me</button>
+      <span id="tooltip" role="tooltip" hidden>Helpful tooltip</span>
+    </section>
+
+    <section aria-label="Text editing">
+      <label for="city">City</label>
+      <input id="city" value="Paris" />
+      <label for="notes">Notes</label>
+      <textarea id="notes">hello world</textarea>
+    </section>
+
+    <section aria-label="Choices">
+      <label><input type="checkbox" id="subscribe" /> Subscribe</label>
+      <label><input type="checkbox" id="locked" /> Locked</label>
+      <label><input type="radio" name="size" id="small" value="small" checked /> Small</label>
+      <label><input type="radio" name="size" id="large" value="large" /> Large</label>
+    </section>
+
+    <section aria-label="Selects">
+      <label for="color">Color</label>
+      <select id="color">
+        <option value="r">Red</option>
+        <option value="g">Green</option>
+        <optgroup label="Dark">
+          <option value="db">Dark blue</option>
+        </optgroup>
+        <option value="x" disabled>Unavailable</option>
+      </select>
+      <label for="toppings">Toppings</label>
+      <select id="toppings" multiple>
+        <option>Cheese</option>
+        <option>Olives</option>
+        <option>Basil</option>
+      </select>
+      <p id="select-output"></p>
+    </section>
+
+    <section aria-label="Transient overlay">
+      <button type="button" id="arm">Arm overlay</button>
+      <span class="cover-wrap">
+        <button type="button" id="briefly">Briefly covered</button>
+        <span class="cover" id="brief-overlay" hidden></span>
+      </span>
+    </section>
+
+    <script>
+      window.__events = [];
+      const log = (type, event) => window.__events.push({ type, id: event.target.id || null, trusted: event.isTrusted });
+
+      const hoverTarget = document.getElementById('hover-target');
+      hoverTarget.addEventListener('mouseenter', (event) => {
+        log('mouseenter', event);
+        document.getElementById('tooltip').hidden = false;
+      });
+
+      // A checkbox whose click handler refuses to change state.
+      document.getElementById('locked').addEventListener('click', (event) => event.preventDefault());
+
+      for (const id of ['color', 'toppings']) {
+        document.getElementById(id).addEventListener('change', (event) => {
+          log('change', event);
+          const values = Array.from(event.target.selectedOptions, (option) => option.value);
+          document.getElementById('select-output').textContent = `${id}: ${values.join(', ')}`;
+        });
+      }
+
+      document.getElementById('arm').addEventListener('click', () => {
+        const overlay = document.getElementById('brief-overlay');
+        overlay.hidden = false;
+        setTimeout(() => { overlay.hidden = true; }, 400);
+      });
+      document.getElementById('briefly').addEventListener('click', (event) => log('click', event));
+    </script>
+  </body>
+</html>

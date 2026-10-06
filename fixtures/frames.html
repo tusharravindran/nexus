@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>NEXUS fixture: frames and shadow DOM</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 40px; }
+      iframe { border: 1px solid #ccc; width: 420px; height: 110px; display: block; margin: 12px 0; }
+    </style>
+  </head>
+  <body>
+    <h1>Frames and shadow DOM</h1>
+
+    <!-- Same-origin srcdoc frame: its document is part of the page's snapshot. -->
+    <iframe
+      id="payment"
+      title="Payment"
+      srcdoc="<!doctype html><body style='font-family:system-ui'>
+        <label for='card'>Card number</label> <input id='card'>
+        <button id='pay' onclick=&quot;document.getElementById('paid').textContent = 'Paid with ' + document.getElementById('card').value&quot;>Pay</button>
+        <p id='paid'></p></body>"
+    ></iframe>
+
+    <!-- File-backed child frame. -->
+    <iframe id="child" title="Child" src="frame-child.html"></iframe>
+
+    <!-- Same button label in the main document, to prove frame scoping. -->
+    <button id="main-pay" type="button">Pay</button>
+
+    <div id="open-host"></div>
+    <div id="closed-host"></div>
+    <p id="shadow-output"></p>
+
+    <script>
+      const output = document.getElementById('shadow-output');
+
+      const open = document.getElementById('open-host').attachShadow({ mode: 'open' });
+      open.innerHTML = `
+        <style>button { font-weight: bold; }</style>
+        <label for="shadow-input">Shadow field</label> <input id="shadow-input">
+        <button id="shadow-button" class="in-shadow">Shadow action</button>`;
+      open.getElementById('shadow-button').addEventListener('click', () => {
+        output.textContent = 'Shadow clicked: ' + open.getElementById('shadow-input').value;
+      });
+
+      const closed = document.getElementById('closed-host').attachShadow({ mode: 'closed' });
+      closed.innerHTML = '<button id="closed-button">Closed action</button>';
+      closed.getElementById('closed-button').addEventListener('click', () => {
+        output.textContent = 'Closed clicked';
+      });
+    </script>
+  </body>
+</html>

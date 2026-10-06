@@ -16,7 +16,7 @@ export function h(tag: string, attrs: Record<string, string> = {}, ...children: 
  * assigned in document order starting at 1 (the document). Every rendered node
  * gets a 100×20 box; `style="display:none"` removes the box for the element
  * and its subtree, and `style="visibility:hidden"` keeps the box but hides it.
- * `data-value` sets the node's live input value.
+ * `data-value` sets the node's live input value; `data-checked` marks it checked.
  */
 export function snapshotOf(...body: Array<ElementSpec | string>): DomSnapshot {
   const raw: RawNode[] = [];
@@ -30,13 +30,14 @@ export function snapshotOf(...body: Array<ElementSpec | string>): DomSnapshot {
     }
     const style = spec.attrs.style ?? '';
     const isRendered = rendered && !/display:\s*none/.test(style);
-    const { 'data-value': inputValue, ...attributes } = spec.attrs;
+    const { 'data-value': inputValue, 'data-checked': checked, ...attributes } = spec.attrs;
     raw.push({
       backendNodeId: index + 1,
       nodeType: NodeType.Element,
       nodeName: spec.tag.toUpperCase(),
       attributes,
       inputValue,
+      checked: checked !== undefined,
       parentIndex,
       bounds: isRendered ? box : undefined,
       visibility: /visibility:\s*hidden/.test(style) ? 'hidden' : 'visible',
