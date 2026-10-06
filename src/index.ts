@@ -1,0 +1,10 @@
+export { NexusBrowser, type BrowserVersion, type TargetInfo } from './browser/browser.ts';
+export { findChromium, type LaunchOptions } from './browser/launcher.ts';
+export { CdpClient, CdpSession, type SendOptions } from './cdp/client.ts';
+export { WebSocketTransport, type Transport } from './cdp/transport.ts';
+export { DomSnapshot, type DomNode, type Rect } from './dom/snapshot.ts';
+export { ElementHandle } from './element/element.ts';
+export { expect, LocatorAssertions, PageAssertions } from './expect.ts';
+export { Locator, type TimeoutOptions, type WaitForOptions } from './locator/locator.ts';
+export { NexusPage, type GotoOptions, type PageEventMap, type ScreenshotOptions } from './page/page.ts';
+export * from './errors.ts';

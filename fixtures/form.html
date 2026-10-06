@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>NEXUS fixture: form</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 40px; color: #1a1a1a; }
+      form { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; }
+      #status { font-weight: 600; color: #0a7a2f; }
+      section { margin: 16px 0; }
+      .cover-wrap { position: relative; display: inline-block; }
+      .cover { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.15); }
+    </style>
+  </head>
+  <body>
+    <h1>Test page</h1>
+
+    <form id="greet">
+      <label for="name">Name</label>
+      <input id="name" name="name" type="text" placeholder="Your name" autocomplete="off" />
+      <button type="submit">Submit</button>
+    </form>
+    <p id="status" role="status" hidden></p>
+
+    <!-- Two identical buttons: strict locators must refuse to guess. -->
+    <section aria-label="Ambiguity">
+      <button type="button" class="delete" id="delete-1">Delete</button>
+      <button type="button" class="delete" id="delete-2">Delete</button>
+    </section>
+
+    <!-- Elements that exist but cannot be acted on. -->
+    <section aria-label="Action errors">
+      <button type="button" id="invisible" style="display: none">Invisible</button>
+      <button type="button" id="disabled" disabled>Disabled</button>
+      <span class="cover-wrap">
+        <button type="button" id="covered">Covered</button>
+        <span class="cover" id="overlay"></span>
+      </span>
+      <p id="plain">Plain paragraph</p>
+    </section>
+
+    <!-- Content that appears asynchronously, for wait tests. -->
+    <section aria-label="Delayed content">
+      <button type="button" id="reveal">Reveal</button>
+      <div id="late-container"></div>
+    </section>
+
+    <a href="next.html">Go to next page</a>
+
+    <script>
+      document.getElementById('greet').addEventListener('submit', (event) => {
+        event.preventDefault();
+        const name = document.getElementById('name').value.trim();
+        const status = document.getElementById('status');
+        status.textContent = name ? `Success: Hello, ${name}` : 'Error: name is required';
+        status.hidden = false;
+      });
+
+      document.getElementById('reveal').addEventListener('click', () => {
+        setTimeout(() => {
+          const late = document.createElement('p');
+          late.id = 'late';
+          late.textContent = 'Loaded later';
+          document.getElementById('late-container').append(late);
+        }, 300);
+      });
+
+      // Lets tests confirm clicks arrive as trusted input events, not element.click().
+      window.__clicks = [];
+      document.addEventListener(
+        'click',
+        (event) => window.__clicks.push({ id: event.target.id || null, trusted: event.isTrusted }),
+        true,
+      );
+    </script>
+  </body>
+</html>
