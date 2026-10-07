@@ -24,3 +24,8 @@ export { StepExecutor, type HealOptions, type StepRepair } from './task/runner.t
 export { parseTarget, replaceRawTarget, stepTarget, withTarget } from './task/schema.ts';
 export { createModelClient, createOpenAICompatibleClient } from './ai/openai-compatible.ts';
 export { profileDir, profilesRoot } from './browser/profile.ts';
+export { enablePrivacy, isPrivate, withPrivacy, assertAiAllowed } from './privacy.ts';
+export { MacDesktop, MacLocator, type MacPermission } from './mac/desktop.ts';
+export { AppSnapshot, appOutline, macRole, type MacNode } from './mac/snapshot.ts';
+export { macTargetFor } from './mac/targets.ts';
+export { MacRecorder } from './mac/recorder.ts';

@@ -1,5 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { AiError } from '../errors.ts';
+import { assertAiAllowed } from '../privacy.ts';
 
 export type MessageParams = Anthropic.Beta.Messages.MessageCreateParamsNonStreaming;
 export type Message = Anthropic.Beta.Messages.BetaMessage;
@@ -86,6 +87,7 @@ export async function createClaudeClient(options: ClaudeClientOptions = {}): Pro
 
   return {
     async create(params) {
+      assertAiAllowed(`a request to ${params.model}`);
       try {
         return await client.beta.messages.create(
           fallbacks

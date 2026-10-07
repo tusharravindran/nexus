@@ -74,3 +74,9 @@ export class TaskValidationError extends NexusError {
 
 /** Calling the model failed (credentials, rate limit, API error) or the model declined. */
 export class AiError extends NexusError {}
+
+/** Privacy mode is on, and something tried to send data to an AI model. Nothing was sent. */
+export class PrivacyError extends NexusError {}
+
+/** A macOS permission (Accessibility, Screen Recording, Input Monitoring) is missing. */
+export class PermissionError extends NexusError {}

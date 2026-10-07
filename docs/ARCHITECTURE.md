@@ -1,4 +1,4 @@
-# NEXUS Architecture (Milestone 4)
+# NEXUS Architecture (Milestone 5)
 
 ## Layers
 
@@ -241,6 +241,29 @@ The model is chosen with `--model`, then `NEXUS_MODEL`, then `claude-opus-5-5`. 
 - It maps SDK errors (authentication, rate limits, API errors, missing credentials) to `AiError`.
 - Callers check `stop_reason` for `refusal` and `max_tokens` before reading content.
 
+## Desktop layer (Milestone 5)
+
+```
+task step with "app" / launch / menu
+        │
+StepExecutor ──► MacDesktop ──► CdpClient ──ProcessTransport (stdin/stdout JSON lines)──► nexus-mac (Swift)
+                    │                                                                      │
+                 MacLocator: snapshot app → match (role/name, id, text) → strict → act      ├─ AXUIElement tree (refs)
+                    │                                                                      ├─ AXPress / AXValue / AXFocused
+                 AppSnapshot (web-style roles, names, visibility; secure values withheld)  ├─ CGEvent mouse & keyboard
+                                                                                           ├─ NSWorkspace launch/activate/quit
+MacRecorder ◄── "recorded" events (CGEventTap: mouse-down, key-down; secure fields: no keys)┘
+```
+
+- **Element identity:** each `tree` call registers fresh refs. Locators re-snapshot on every attempt, so a stale ref is never used across UI changes.
+- **Real input:** clicks use the element's frame centre, and keyboard events go to the frontmost app. The helper activates the app first: cooperative `activate()` plus the accessibility "frontmost" attribute.
+- **Recording** is a listen-only event tap. The element under the pointer is described *before* the click is processed, so a control that changes or disappears still records what was clicked. The app the recorder was started from is ignored.
+- **Permissions** belong to the app NEXUS runs from. `nexus mac-setup` reports them and opens the prompts, and `PermissionError` explains what to switch on.
+
+## Privacy
+
+`privacy.ts` holds a process-wide flag plus counted scopes. `assertAiAllowed()` runs at the start of every model request, in all three model clients. See DECISIONS D41.
+
 ## Errors
 
 Every error extends `NexusError`:
@@ -256,6 +279,8 @@ Every error extends `NexusError`:
 - `VerificationError`
 - `TaskValidationError`, which carries an `issues[]` list
 - `AiError`: calling Claude failed or Claude declined
+- `PrivacyError`: something tried to send data to a model while privacy mode was on (nothing was sent)
+- `PermissionError`: a macOS permission is missing
 
 ## Testability seams
 

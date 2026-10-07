@@ -1,4 +1,5 @@
 import { AiError } from '../errors.ts';
+import { assertAiAllowed } from '../privacy.ts';
 import { createClaudeClient, type Message, type MessageParams, type ModelClient } from './model.ts';
 
 /**
@@ -49,6 +50,7 @@ export function createOpenAICompatibleClient(options: OpenAICompatibleOptions = 
 
   return {
     async create(params) {
+      assertAiAllowed(`a request to ${params.model}`);
       let response: Response;
       try {
         response = await fetchImpl(`${baseURL}/v1/chat/completions`, {
@@ -83,6 +85,7 @@ export function createModelClient(options: { fetch?: typeof fetch } = {}): Model
   let other: ModelClient | undefined;
   return {
     async create(params) {
+      assertAiAllowed(`a request to ${params.model}`);
       if (String(params.model).startsWith('claude')) {
         claude ??= createClaudeClient(options);
         return (await claude).create(params);

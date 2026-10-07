@@ -40,8 +40,9 @@ while true; do
   echo "  1) Run a task"
   echo "  2) Record a new task"
   echo "  3) Open a browser to log in"
-  echo "  4) Quit"
-  read "choice?Choose 1-4: "
+  echo "  4) Record a Mac app task (mouse + keyboard)"
+  echo "  5) Quit"
+  read "choice?Choose 1-5: "
   case "$choice" in
     1)
       choose_task || continue
@@ -65,11 +66,18 @@ while true; do
       [[ -z "$url" ]] && continue
       nexus open "$url" --profile "$PROFILE"
       ;;
-    4|q|Q|"")
+    4)
+      read "name?Short name for this task (e.g. notes-standup): "
+      name="${${name// /-}:l}"
+      [[ -z "$name" ]] && continue
+      echo "Use your apps; come back to this window and press Ctrl+C to finish."
+      nexus record-mac --out "recordings/${name}.json" --name "$name"
+      ;;
+    5|q|Q|"")
       exit 0
       ;;
     *)
-      echo "Please choose 1, 2, 3 or 4."
+      echo "Please choose 1 to 5."
       ;;
   esac
 done

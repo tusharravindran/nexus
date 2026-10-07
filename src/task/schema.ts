@@ -5,6 +5,14 @@ import { TaskValidationError } from '../errors.ts';
  * `within` scopes the search to another target (e.g. an iframe or a panel).
  */
 export interface TargetSpec {
+  /**
+   * A macOS app ("Notes", or a bundle id like "com.apple.Notes"): the target is
+   * a desktop element in that app instead of a web element. With no role,
+   * text or id, it means "whatever has keyboard focus in the app".
+   */
+  app?: string;
+  /** Accessibility identifier of a desktop element; only with `app`. */
+  id?: string;
   css?: string;
   text?: string;
   role?: string;
@@ -47,6 +55,8 @@ export type Step = StepOptions &
     | { action: 'onDialog'; policy: 'accept' | 'dismiss' | { accept: string } }
     | { action: 'expectDialog'; text: string }
     | { action: 'closePopup' }
+    | { action: 'launch'; app: string }
+    | { action: 'menu'; app: string; path: string[] }
   );
 
 export type StepAction = Step['action'];
@@ -54,6 +64,8 @@ export type StepAction = Step['action'];
 export interface Task {
   name: string;
   description?: string;
+  /** Privacy mode for this task: nothing from it is ever sent to an AI model. */
+  private?: boolean;
   /** Declared `{{placeholders}}`: name → default value, or null if the value is required. */
   params?: Record<string, string | null>;
   steps: Step[];
@@ -62,12 +74,12 @@ export interface Task {
 const ACTIONS: readonly StepAction[] = [
   'goto', 'click', 'hover', 'type', 'fill', 'press', 'check', 'uncheck', 'select',
   'waitFor', 'waitForNetworkIdle', 'wait', 'expectText', 'expectVisible', 'expectValue',
-  'expectElementText', 'screenshot', 'upload', 'onDialog', 'expectDialog', 'closePopup',
+  'expectElementText', 'screenshot', 'upload', 'onDialog', 'expectDialog', 'closePopup', 'launch', 'menu',
 ];
 const STEP_OPTION_KEYS = new Set(['name', 'timeoutMs', 'waitForNavigation', 'opensPopup']);
 const PLACEHOLDER = /\{\{\s*([A-Za-z_][\w-]*)\s*\}\}/g;
 const PARAM_NAME = /^[A-Za-z_][\w-]*$/;
-const TARGET_KEYS = new Set(['css', 'text', 'role', 'name', 'exact', 'nth', 'within']);
+const TARGET_KEYS = new Set(['app', 'id', 'css', 'text', 'role', 'name', 'exact', 'nth', 'within']);
 
 type Json = unknown;
 
@@ -97,7 +109,7 @@ export function parseTask(input: Json): Task {
   if (!isObject(input)) throw new TaskValidationError(['task: must be a JSON object']);
 
   for (const key of Object.keys(input)) {
-    if (!['name', 'description', 'params', 'steps'].includes(key)) issues.add('task', `unknown key "${key}"`);
+    if (!['name', 'description', 'private', 'params', 'steps'].includes(key)) issues.add('task', `unknown key "${key}"`);
   }
   const params = parseParams(input.params, issues);
   const name = typeof input.name === 'string' && input.name.trim() ? input.name : undefined;
@@ -105,6 +117,7 @@ export function parseTask(input: Json): Task {
   if (input.description !== undefined && typeof input.description !== 'string') {
     issues.add('task.description', 'must be a string');
   }
+  if (input.private !== undefined && typeof input.private !== 'boolean') issues.add('task.private', 'must be true or false');
 
   const steps: Step[] = [];
   if (!Array.isArray(input.steps) || input.steps.length === 0) {
@@ -122,7 +135,13 @@ export function parseTask(input: Json): Task {
   }
 
   if (issues.list.length > 0) throw new TaskValidationError(issues.list);
-  return { name: name!, description: input.description as string | undefined, ...(params ? { params } : {}), steps };
+  return {
+    name: name!,
+    description: input.description as string | undefined,
+    ...(input.private === true ? { private: true } : {}),
+    ...(params ? { params } : {}),
+    steps,
+  };
 }
 
 /**
@@ -326,6 +345,17 @@ function parseStep(raw: Json, path: string, issues: Issues): Step | undefined {
       if (value !== true) issues.add(at, 'must be true');
       step = { action };
       break;
+    case 'launch':
+      step = { action, app: string(value, at, issues) };
+      break;
+    case 'menu': {
+      const fields = object(value, at, issues, ['app', 'path']);
+      const menuPath = fields.path;
+      const valid = Array.isArray(menuPath) && menuPath.length > 0 && menuPath.every((item) => typeof item === 'string' && item !== '');
+      if (!valid) issues.add(`${at}.path`, 'must be a non-empty array of menu titles, e.g. ["File", "New Window"]');
+      step = { action, app: string(fields.app, `${at}.app`, issues), path: valid ? (menuPath as string[]) : [] };
+      break;
+    }
   }
   return issues.list.length === before ? { ...options, ...step! } : undefined;
 }
@@ -337,9 +367,20 @@ function target(value: Json, path: string, issues: Issues): TargetSpec {
   }
   for (const key of Object.keys(value)) if (!TARGET_KEYS.has(key)) issues.add(path, `unknown target key "${key}"`);
 
-  const kinds = (['css', 'text', 'role'] as const).filter((kind) => value[kind] !== undefined);
-  if (kinds.length !== 1) issues.add(path, 'needs exactly one of "css", "text" or "role"');
-  for (const kind of kinds) if (typeof value[kind] !== 'string' || !(value[kind] as string)) issues.add(`${path}.${kind}`, 'must be a non-empty string');
+  const desktop = value.app !== undefined;
+  if (desktop) {
+    if (typeof value.app !== 'string' || !value.app) issues.add(`${path}.app`, 'must be a non-empty app name or bundle id');
+    if (value.css !== undefined) issues.add(`${path}.css`, 'not available for desktop targets; use "id" (accessibility identifier)');
+    if (value.within !== undefined) issues.add(`${path}.within`, 'not available for desktop targets');
+    const desktopKinds = (['text', 'role', 'id'] as const).filter((kind) => value[kind] !== undefined);
+    if (desktopKinds.length > 1) issues.add(path, 'a desktop target uses at most one of "text", "role" or "id"');
+    for (const kind of desktopKinds) if (typeof value[kind] !== 'string' || !(value[kind] as string)) issues.add(`${path}.${kind}`, 'must be a non-empty string');
+  } else {
+    if (value.id !== undefined) issues.add(`${path}.id`, 'only allowed with "app" (for web elements use {"css": "#id"})');
+    const kinds = (['css', 'text', 'role'] as const).filter((kind) => value[kind] !== undefined);
+    if (kinds.length !== 1) issues.add(path, 'needs exactly one of "css", "text" or "role"');
+    for (const kind of kinds) if (typeof value[kind] !== 'string' || !(value[kind] as string)) issues.add(`${path}.${kind}`, 'must be a non-empty string');
+  }
 
   if (value.name !== undefined) {
     if (value.role === undefined) issues.add(`${path}.name`, 'only allowed with "role"');
@@ -354,6 +395,8 @@ function target(value: Json, path: string, issues: Issues): TargetSpec {
   }
 
   const spec: TargetSpec = {};
+  if (typeof value.app === 'string') spec.app = value.app;
+  if (typeof value.id === 'string') spec.id = value.id;
   if (typeof value.css === 'string') spec.css = value.css;
   if (typeof value.text === 'string') spec.text = value.text;
   if (typeof value.role === 'string') spec.role = value.role;

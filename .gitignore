@@ -5,3 +5,5 @@ artifacts/
 # Your own recorded and drafted tasks (may contain company URLs and data). This repository is public.
 recordings/
 drafts/
+# Compiled macOS helper and fixture app (rebuilt from source on demand)
+native/mac/.build/

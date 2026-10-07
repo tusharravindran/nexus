@@ -6,6 +6,10 @@
  *   node src/cli.ts record <url-or-file> [--out=<task.json>] [--name=<name>]
  *   node src/cli.ts draft "<goal>" --url=<start> [--out=<task.json>] [--max-steps=<n>] [--headed] [--model=<id>]
  *   node src/cli.ts open <url-or-file> --profile=<name>
+ *   node src/cli.ts record-mac [--out=<task.json>] [--name=<name>]
+ *   node src/cli.ts mac-setup
+ *
+ * Every command accepts --private: nothing is sent to any AI model.
  *
  * run, record and draft accept --profile=<name|path> to use a persistent profile (logins kept).
  *
@@ -17,7 +21,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { NexusBrowser } from './browser/browser.ts';
-import { AiError, TaskValidationError } from './errors.ts';
+import { AiError, PrivacyError, TaskValidationError } from './errors.ts';
+import { MacDesktop } from './mac/desktop.ts';
+import { MacRecorder } from './mac/recorder.ts';
+import { enablePrivacy, isPrivate } from './privacy.ts';
 import { Recorder, type RawStep } from './recorder/recorder.ts';
 import { ClaudeAdvisor } from './ai/advisor.ts';
 import { draftTask } from './ai/drafter.ts';
@@ -30,6 +37,12 @@ const USAGE = `Usage:
   nexus record <url> [options]         Record a task by using the browser
   nexus draft "<goal>" --url=<start>   Let Claude draft a task by using the browser
   nexus open <url> --profile=<name>    Open a browser with a saved profile (e.g. to log in once)
+  nexus record-mac                     Record a task in Mac apps (mouse, keyboard, menus)
+  nexus mac-setup                      Check / request the macOS permissions desktop tasks need
+
+Privacy (every command):
+  --private                Privacy mode: nothing is sent to any AI model (also NEXUS_PRIVATE=1,
+                           or "private": true in a task file). Rule-based repairs still work.
 
 Profiles (run, record, draft, open):
   --profile=<name|path>    Keep logins and site data between runs. A name is stored in
@@ -82,6 +95,7 @@ async function main(argv: string[]): Promise<number> {
         url: { type: 'string' },
         'max-steps': { type: 'string' },
         profile: { type: 'string' },
+        private: { type: 'boolean', default: false },
         json: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -95,7 +109,10 @@ async function main(argv: string[]): Promise<number> {
     console.log(USAGE);
     return 0;
   }
+  if (values.private) enablePrivacy();
   const [command, target, ...extra] = positionals;
+  if (command === 'record-mac') return recordMac(values);
+  if (command === 'mac-setup') return macSetup();
   if (!target || extra.length > 0) {
     console.error(USAGE);
     return 2;
@@ -179,7 +196,11 @@ async function run(file: string, values: RunFlags): Promise<number> {
   const artifactsDir = values.out ?? path.join('artifacts', 'runs', `${slug(task.name)}-${timestamp()}`);
 
   if (!values.json) {
-    const tags = [heal ? `heal: ${heal.mode}${heal.advisor ? ' + AI' : ''}` : '', values.profile ? `profile: ${values.profile}` : ''].filter(Boolean);
+    const tags = [
+      isPrivate() || task.private ? '🔒 private' : '',
+      heal ? `heal: ${heal.mode}${heal.advisor && !(isPrivate() || task.private) ? ' + AI' : ''}` : '',
+      values.profile ? `profile: ${values.profile}` : '',
+    ].filter(Boolean);
     console.log(`▶ ${task.name}  (${task.steps.length} steps)${tags.length > 0 ? `  [${tags.join(', ')}]` : ''}`);
   }
   const result = await runTask(task, {
@@ -343,7 +364,7 @@ async function draft(
       },
     });
   } catch (error) {
-    if (error instanceof AiError) {
+    if (error instanceof AiError || error instanceof PrivacyError) {
       console.error(`  ! ${error.message}`);
       return 2;
     }
@@ -384,6 +405,98 @@ async function open(url: string, values: { profile?: string; headless?: boolean 
   await finished;
   await browser.close();
   console.log(`■ Saved. Use it with: --profile=${values.profile}`);
+  return 0;
+}
+
+// ── desktop ─────────────────────────────────────────────────────────────
+
+async function macSetup(): Promise<number> {
+  const desktop = await MacDesktop.start();
+  try {
+    const before = await desktop.permissions();
+    const line = (granted: Record<string, boolean>) =>
+      `Accessibility ${granted.accessibility ? '✔' : '✖'}   Screen Recording ${granted.screenRecording ? '✔' : '✖'}   Input Monitoring ${granted.inputMonitoring ? '✔' : '✖'}`;
+    console.log(`Permissions for the app running NEXUS: ${line(before)}`);
+    if (before.accessibility && before.screenRecording && before.inputMonitoring) {
+      console.log('All set.');
+      return 0;
+    }
+    await desktop.requestPermissions({ screenRecording: !before.screenRecording, inputMonitoring: !before.inputMonitoring });
+    console.log(
+      [
+        '',
+        'macOS is asking for the missing permissions. In System Settings → Privacy & Security, switch on',
+        'the app you run NEXUS from (for example Terminal) under:',
+        '  • Accessibility      — read apps and click/type (required)',
+        '  • Input Monitoring   — record your actions (record-mac)',
+        '  • Screen Recording   — screenshots of desktop steps (optional)',
+        'Then quit and reopen that app, and run `npm run nexus -- mac-setup` again to check.',
+      ].join('\n'),
+    );
+    return 1;
+  } finally {
+    desktop.close();
+  }
+}
+
+async function recordMac(values: { out?: string; name?: string }): Promise<number> {
+  const desktop = await MacDesktop.start();
+  try {
+    await desktop.requirePermissions('accessibility', 'inputMonitoring');
+  } catch (error) {
+    console.error(`  ! ${(error as Error).message}`);
+    desktop.close();
+    return 2;
+  }
+  const name = values.name ?? 'desktop task';
+  const out = path.resolve(values.out ?? path.join('recordings', `${slug(name)}.json`));
+  // Don't record the terminal this command runs in (e.g. pressing Ctrl+C to stop).
+  const front = (await desktop.client.send<{ frontmost?: { pid: number } }>('apps')).frontmost;
+
+  let writing = Promise.resolve();
+  const save = (task: Record<string, unknown>): Promise<void> => {
+    writing = writing.then(async () => {
+      await mkdir(path.dirname(out), { recursive: true });
+      await writeFile(out, `${JSON.stringify(task, null, 2)}\n`);
+    });
+    return writing;
+  };
+
+  let shown = 0;
+  let recorder: MacRecorder | undefined;
+  recorder = await MacRecorder.start(desktop, {
+    ignorePids: front ? [front.pid] : [],
+    onChange: (steps) => {
+      for (; shown < steps.length; shown++) console.log(`  + ${JSON.stringify(steps[shown])}`);
+      if (recorder) void save(recorder.toTask(name));
+    },
+  });
+
+  console.log(`● Recording desktop actions → ${path.relative(process.cwd(), out)}`);
+  console.log('  Use your apps as you normally would. Passwords are never recorded.');
+  console.log('  Come back here and press Ctrl+C to finish.');
+  await new Promise<void>((resolve) => {
+    process.once('SIGINT', resolve);
+    process.once('SIGTERM', resolve);
+  });
+
+  await recorder.stop();
+  const task = recorder.toTask(name);
+  await save(task);
+  desktop.close();
+  const count = (task.steps as unknown[]).length;
+  console.log(`\n■ Recorded ${count} step(s) to ${path.relative(process.cwd(), out)}`);
+  if (count === 0) {
+    console.log('  Nothing was recorded: click or type in an app (not this terminal) before pressing Ctrl+C.');
+    return 0;
+  }
+  try {
+    parseTask(task);
+  } catch (error) {
+    console.log(`  ! The recording does not validate yet: ${(error as Error).message}`);
+  }
+  for (const warning of recorder.warnings) console.log(`  ! ${warning}`);
+  console.log(`  Replay: npm run nexus -- run ${path.relative(process.cwd(), out)}`);
   return 0;
 }
 

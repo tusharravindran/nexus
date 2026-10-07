@@ -304,17 +304,68 @@ Thinking, effort, cache hints and refusal fallbacks have no equivalent there, so
 
 ---
 
+# Milestone 5 decisions
+
+## D37. A Swift helper speaking CDP-shaped JSON
+
+**Decision.** Desktop control lives in `nexus-mac`, a small Swift program. NEXUS spawns it and exchanges newline-delimited JSON (`{id, method, params}` → `{id, result|error}`, plus events). NEXUS's existing `CdpClient` drives it unchanged through a `ProcessTransport`. The helper is compiled on first use and recompiled only when its source changes.
+
+**Why.** The macOS Accessibility API and CGEvent input are C/Objective-C APIs, and Node can't call them without a native add-on. A separate process keeps NEXUS free of native builds, reuses all of the client's machinery (ids, timeouts, disconnects, events), and keeps the privileged code small and readable.
+
+## D38. Desktop targets use the same vocabulary and rules as web targets
+
+**Decision.** Accessibility roles are mapped to web-style roles (`AXButton` → `button`, `AXTextField` → `textbox`, …). Names come from title, description, label or placeholder. Locators are lazy, strict and auto-waiting, the recorder uses a role-and-name-first target picker, and self-healing works the same way.
+
+**Why.** One task format and one mental model for web and desktop. Steps can be mixed, and everything built on targets (recorder, self-healing, AI outlines, reports) works for both.
+
+## D39. Real input for clicks and typing; accessibility actions only where input can't do it
+
+**Decision.**
+- `click` moves the real pointer and clicks the element's centre.
+- `type` sends real keystrokes.
+- `fill` sets a value through accessibility, then *verifies* it, falling back to select-all plus typing.
+- Pop-up items and menu paths are pressed through accessibility, because their menus are drawn outside the window.
+
+**Why.** Real input exercises the app as a person would. The fallbacks cover controls that don't accept accessibility values, and menus that would otherwise need fragile pointer travel.
+
+**Cost.** Desktop steps take over the Mac's pointer and keyboard while they run.
+
+## D40. Wait for the app to confirm, not for time to pass
+
+Three issues the real-Mac tests found:
+1. **App lists:** the helper first ran a bare run loop, so NSWorkspace never updated its list of running apps, and a just-launched app appeared "not running". It now runs as an invisible AppKit application and also remembers apps it launched by process id.
+2. **Pop-up menus:** a pop-up updates its value first and runs the app's action only after the menu closes. `selectOption` waits for both.
+3. **Keyboard focus:** focusing completes asynchronously. `focus()` now waits until the app reports the element focused, clicking it if needed.
+4. **Stuck modifiers:** typed characters are posted on key code 0 (the "A" key) with the text attached. After a shortcut such as Command+A or Command+R, the system could still consider Command held, so every typed character became *select all*: a password arrived as 0 or 1 characters. Typed events now carry explicitly empty modifier flags, and every chord is followed by a "modifiers released" event. A probe of three typing paths went from mostly 0 to 4/4/4 characters every time.
+
+## D41. Privacy mode is enforced at the model boundary; passwords are never exposed
+
+**Decision.** `assertAiAllowed()` runs inside every `ModelClient.create()`: the Claude SDK client, the OpenAI-format adapter and the router. Privacy mode is switched on by:
+- `--private`
+- `NEXUS_PRIVATE`
+- `"private": true` in a task
+- `withPrivacy()` in code
+
+Private runs never consult the AI advisor, `draft` refuses, desktop screenshots aren't taken, and the report is marked.
+
+Independent of privacy mode, password fields are protected:
+- The helper never reports a secure field's value.
+- Outlines show `value=•••`.
+- The recorder writes a `{{password}}` placeholder instead of keystrokes.
+- `fill` never sets a secure field programmatically.
+
+**Why.** "The AI won't take anything" has to hold even when a future feature forgets to check, so the check sits at the one point all model traffic passes through. A test verifies that no request reaches the network. Passwords need protection in every mode, not only private mode.
+
+**Note.** Privacy scopes are process-wide while active, so they fail closed: a non-private task running concurrently in the same process is also blocked from AI. This is preferable to leaking.
+
+---
+
 # Recommended next milestone
 
-**Milestone 5 — Real-world hardening and a live AI evaluation**
+**Milestone 6: an assistant you can talk to**
 
-1. **Live evaluation of the AI layer:** a set of deliberately broken tasks (renamed buttons, restructured forms, moved fields) with known correct repairs, plus a set of draftable goals on the fixtures. Run them against Claude to measure repair accuracy, false repairs and cost per run. Then tune prompts and effort against that data, not intuition.
-2. **Runtime gaps real sites hit:**
-   - downloads (`Browser.setDownloadBehavior` plus waiting for completion)
-   - double-click and right-click
-   - drag-and-drop
-   - HTTP authentication
-   - `beforeunload` handling
-3. **Credentials in tasks:** `{{secret:name}}` params resolved from the environment or the OS keychain, masked in reports, results and AI prompts.
-4. **Scheduling and history:** run tasks on a schedule, keep a run history, and flag tasks whose repairs keep recurring (a sign the task should be re-recorded).
-5. **Voice and assistant front end** (the original Siri-like goal): speech-to-text → `draft` or a named task with `{{params}}` → spoken summary of the result, built on the deterministic runner and the drafter.
+1. **Voice:** a push-to-talk hotkey, then on-device speech-to-text (the Speech framework or whisper.cpp; on-device, so privacy mode can stay on), then intent matching against your saved tasks ("start my workday" → `Keka Clock In`), then a spoken result.
+2. **A task library with parameters and phrases:** each task declares the phrases that trigger it and the `{{params}}` to fill from speech ("note that I'm out on Friday" → the Notes task with `text=…`).
+3. **Desktop drafting:** `draft` for desktop goals, using app outlines and the same step-by-step loop (not in privacy mode).
+4. **Scheduling and history:** run tasks on a schedule ("every weekday at 9:30"), keep a run history, and notify on failure.
+5. **Live AI evaluation** (carried over): measure repair and draft accuracy on a fixed set of broken tasks before tuning prompts further.

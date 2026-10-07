@@ -67,6 +67,7 @@ export function renderReport(result: TaskResult): string {
     ${passed}/${result.steps.length} steps · ${formatMs(result.durationMs)} · ${escape(new Date(result.startedAt).toLocaleString())}
   </div>
   ${params}
+  ${result.private ? '<p class="notice">🔒 Private run: nothing from this run was sent to any AI model.</p>' : ''}
   ${result.repairs ? `<p class="notice">Self-healing found ${result.repairs.applied + result.repairs.suggested} replacement target(s): ${result.repairs.applied} applied, ${result.repairs.suggested} suggested.${result.repairs.file ? ` Review <code>${escape(result.repairs.file)}</code> before adopting it.` : ''}</p>` : ''}
   <ol>
 ${result.steps.map(renderStep).join('\n')}

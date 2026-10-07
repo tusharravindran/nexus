@@ -85,7 +85,8 @@ function describe(snapshot: DomSnapshot, node: DomNode, role: string): string {
   if (name) parts.push(quote(clip(name, 80)));
   if (role === 'textbox' || role === 'searchbox' || role === 'combobox') {
     const value = formValue(snapshot, node);
-    if (value) parts.push(`value=${quote(clip(value, 60))}`);
+    // Passwords are never shown to a model, in any mode.
+    if (value) parts.push(isPassword(node) ? 'value=•••' : `value=${quote(clip(value, 60))}`);
   }
   if ((role === 'checkbox' || role === 'radio' || role === 'switch') && isChecked(node)) parts.push('checked');
   if (isDisabled(node)) parts.push('disabled');
@@ -93,6 +94,10 @@ function describe(snapshot: DomSnapshot, node: DomNode, role: string): string {
   const id = node.attributes.id;
   if (id && looksStable(id)) parts.push(`#${id}`);
   return parts.join(' ');
+}
+
+function isPassword(node: DomNode): boolean {
+  return node.tagName === 'input' && (node.attributes.type ?? '').toLowerCase() === 'password';
 }
 
 function indent(depth: number): string {

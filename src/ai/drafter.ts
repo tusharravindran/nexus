@@ -3,6 +3,7 @@ import path from 'node:path';
 import { NexusBrowser } from '../browser/browser.ts';
 import type { LaunchOptions } from '../browser/launcher.ts';
 import { TaskValidationError } from '../errors.ts';
+import { assertAiAllowed } from '../privacy.ts';
 import { pageOutline } from '../heal/outline.ts';
 import type { NexusPage } from '../page/page.ts';
 import { resolveUrl, StepExecutor } from '../task/runner.ts';
@@ -115,6 +116,8 @@ const TOOLS: Tool[] = [
  * are kept, so the draft is a task that has already run once.
  */
 export async function draftTask(options: DraftOptions): Promise<DraftResult> {
+  // Drafting *is* sending the page to a model; refuse before opening anything.
+  assertAiAllowed('drafting a task');
   const baseDir = options.baseDir ?? process.cwd();
   const startUrl = resolveUrl(options.startUrl, baseDir);
   const allowed = new Set(options.allowedOrigins ?? [new URL(startUrl).origin]);

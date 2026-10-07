@@ -17,6 +17,9 @@ A deterministic browser automation runtime that talks to Chromium directly over 
   - cross-site (out-of-process) iframes
   - dialogs, popups and new tabs, and file uploads
   - an HTML report for every run
+- **Milestone 5:**
+  - **Mac desktop automation**: read any app's accessibility tree, click and type with the real mouse and keyboard, menus, and `nexus record-mac`
+  - **privacy mode**: nothing is ever sent to an AI model
 - **Milestone 4:**
   - **self-healing replay**: a step whose target broke is repaired by rules first, then optionally by Claude. Every repair is verified against the live page and written out for review.
   - **`nexus draft "<goal>"`**: Claude works out a task by using the browser through NEXUS, one validated step at a time
@@ -47,6 +50,63 @@ await browser.close();
   ```bash
   export NEXUS_CHROMIUM_PATH="/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
   ```
+
+## Mac desktop automation
+
+NEXUS can drive native Mac apps (Notes, Finder, Slack, System Settings…) as well as web pages. Desktop steps name an `app`; web and desktop steps can be mixed in one task:
+
+```json
+{
+  "name": "Note from Keka",
+  "steps": [
+    { "launch": "Notes" },
+    { "menu": { "app": "Notes", "path": ["File", "New Note"] } },
+    { "type": { "target": { "app": "Notes" }, "text": "Clocked in" } },
+    { "click": { "app": "Notes", "role": "button", "name": "Done" } }
+  ]
+}
+```
+
+| Desktop target | Meaning |
+|---|---|
+| `{ "app": "Notes", "role": "button", "name": "Done" }` | role and accessible name (preferred) |
+| `{ "app": "Notes", "id": "title" }` | accessibility identifier |
+| `{ "app": "Notes", "text": "Groceries" }` | visible text |
+| `{ "app": "Notes" }` | whatever has keyboard focus in the app (for `type` / `press`) |
+
+- **Actions:** `click` (real pointer), `hover`, `type`, `fill`, `press` (keys like `"Command+S"`), `check`, `uncheck`, `select` (pop-up menus), `waitFor`, `expectVisible`, `expectValue`, `expectElementText`.
+- **App steps:** `launch` opens an app by name, bundle id or `.app` path. `menu` picks a menu item by its path.
+- **Self-healing works for desktop targets too.**
+
+```bash
+npm run nexus -- mac-setup                 # check / request macOS permissions
+npm run nexus -- record-mac --out recordings/notes.json   # record; Ctrl+C here to stop
+npm run nexus -- run recordings/notes.json
+```
+
+**Permissions:** grant them to the app you run NEXUS from (for example Terminal) in **System Settings → Privacy & Security**:
+- **Accessibility** is required.
+- **Input Monitoring** is needed for `record-mac`.
+- **Screen Recording** is optional: it's used for screenshots of desktop steps.
+
+**Things to know:**
+- **Desktop steps use *your* mouse and keyboard.** Don't use the Mac while they run.
+- **Passwords are never recorded,** and the values of password fields are never read. The recording gets a `{{password}}` placeholder, which you pass at run time with `--param password=…`.
+- **Apps with poor accessibility information** (some games, custom-drawn interfaces) can't be targeted by role and name.
+
+## Privacy mode
+
+```bash
+npm run nexus -- run task.json --private     # this command
+NEXUS_PRIVATE=1                               # in .env: always
+{ "name": "...", "private": true, ... }       # in a task: whenever it runs
+```
+
+In privacy mode, **nothing is sent to any AI model**: no page or app outlines, no screenshots, no task contents.
+- It's enforced where model requests are made, not only by features choosing not to call one, so even a code path that forgets to check can't send anything.
+- Rule-based self-healing still works, because it never leaves your Mac. `draft` refuses to run.
+- Desktop screenshots aren't taken, and the report shows 🔒 *Private run*.
+- **Always on, private mode or not:** password fields never show their value in anything sent to a model.
 
 ## AI features (optional)
 
@@ -292,6 +352,8 @@ npm run test:integration   # launches real headless Chromium against fixtures/
 npm test                   # unit + integration
 ```
 
+Desktop tests drive a small test app (NexusFixture) with the real mouse and keyboard, so they only run when asked: `NEXUS_DESKTOP_TESTS=1 npm run test:integration` (needs Accessibility and Input Monitoring; hands off while they run).
+
 The integration tests use only `fixtures/` and a local HTTP server started on `127.0.0.1` by the tests. They never contact an external website, and they never call Claude: AI behaviour is tested against a scripted model and a fake `fetch`.
 
 ## API at a glance
@@ -325,11 +387,14 @@ src/
   task/        task schema/validation, params, runner, HTML report
   recorder/    recorder, page-side recording script, robust target generation
   heal/        page outline for models, rule-based repair, proposal verification
+  mac/         desktop driver (helper client, app snapshots, locators, recorder, targets)
+  privacy.ts   privacy mode (no AI)
   ai/          Claude client (SDK), repair advisor, task drafter
   cli.ts       `nexus run <task.json>` and `nexus record <url>`
   wait.ts      condition polling with change-driven wake-ups
   expect.ts    retrying assertions
 fixtures/      deterministic local HTML test pages
+native/mac/    nexus-mac Swift helper and the NexusFixture test app (built on demand)
 examples/      demo script + example tasks
 test/          unit (fakes) and integration (real Chromium) tests
 docs/          ARCHITECTURE.md, DECISIONS.md

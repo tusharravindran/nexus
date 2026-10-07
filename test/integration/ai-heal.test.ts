@@ -56,7 +56,7 @@ describe('self-healing replay', () => {
     };
   }
 
-  async function run(json: ReturnType<typeof source>, heal: HealOptions | undefined, name: string) {
+  async function run(json: ReturnType<typeof source> & { private?: boolean }, heal: HealOptions | undefined, name: string) {
     const artifactsDir = path.join(scratch, name);
     const result = await runTask(parseTask(json), { browser, artifactsDir, heal, source: json });
     return { result, artifactsDir };
@@ -122,6 +122,21 @@ describe('self-healing replay', () => {
     const repair = result.steps[2]!.repair!;
     assert.equal(repair.to, undefined);
     assert.match(repair.reason, /AI proposed .*Delete.* but it matches 2 elements/);
+  });
+
+  it('private tasks never consult the AI advisor; rules still repair, and the report says so', async () => {
+    const advisor = new FakeAdvisor({ role: 'button', name: 'Submit' });
+    const json = { ...source({ role: 'button', name: 'Proceed' }), private: true };
+    const { result, artifactsDir } = await run(json, { mode: 'apply', advisor }, 'private');
+    assert.equal(advisor.asked.length, 0, 'nothing was sent to the advisor');
+    assert.equal(result.status, 'failed');
+    assert.equal(result.private, true);
+    assert.match(result.steps[2]!.repair!.reason, /AI not consulted: privacy mode is on/);
+    assert.match(await readFile(path.join(artifactsDir, 'report.html'), 'utf8'), /Private run: nothing from this run was sent to any AI model/);
+
+    const rules = await run({ ...source({ role: 'button', name: 'Submit form' }), private: true }, { mode: 'apply', advisor }, 'private-rules');
+    assert.equal(rules.result.status, 'passed', 'rule-based repairs never leave the machine, so they still work');
+    assert.equal(advisor.asked.length, 0);
   });
 
   it('never repairs a failed check: it may be a real bug', async () => {
@@ -199,6 +214,16 @@ describe('drafting a task with Claude (scripted)', () => {
     // The draft is a real task.
     const replay = await runTask(parseTask(result.task), { browser, artifactsDir: path.join(scratch, 'replay') });
     assert.equal(replay.status, 'passed');
+  });
+
+  it('refuses to draft in privacy mode, before opening a page', async () => {
+    const model = new ScriptedModel([]);
+    const { withPrivacy } = await import('../../src/privacy.ts');
+    await assert.rejects(
+      withPrivacy(() => draftTask({ goal: 'g', startUrl: formUrl, model, browser, artifactsDir: path.join(scratch, 'private-draft') })),
+      /Privacy mode is on: drafting a task was not sent/,
+    );
+    assert.equal(model.requests.length, 0);
   });
 
   it('stops on a refusal, and after the step limit', async () => {

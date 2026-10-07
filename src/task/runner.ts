@@ -8,6 +8,12 @@ import { expect } from '../expect.ts';
 import { pageOutline } from '../heal/outline.ts';
 import { deterministicRepair, isRepairable, rejectProposal, type RepairContext, type TargetAdvisor } from '../heal/repair.ts';
 import type { DialogPolicy, NexusPage } from '../page/page.ts';
+import { isPrivate, withPrivacy } from '../privacy.ts';
+import { MacDesktop } from '../mac/desktop.ts';
+import { appOutline } from '../mac/snapshot.ts';
+import { macTargetFor } from '../mac/targets.ts';
+import { textMatches } from '../dom/match.ts';
+import { similarity } from '../heal/repair.ts';
 import { poll } from '../wait.ts';
 import { toLocator } from './locate.ts';
 import { renderReport } from './report.ts';
@@ -35,6 +41,8 @@ export interface RunTaskOptions {
    * isolated, unless the browser was launched with a profile.
    */
   isolate?: boolean;
+  /** Privacy mode for this run (also on when the task says "private": true or NEXUS_PRIVATE is set). */
+  private?: boolean;
   /** Self-healing for steps whose target broke. Off unless set. */
   heal?: HealOptions;
   /** The task file's JSON as written; needed to write task.repaired.json. */
@@ -88,6 +96,8 @@ export interface TaskResult {
   artifactsDir: string;
   /** Parameter values the run used (after defaults). */
   params?: Record<string, string>;
+  /** True when the run was in privacy mode: nothing was sent to any AI model. */
+  private?: boolean;
   /** Present when self-healing found replacements; `file` is the patched task, for review. */
   repairs?: { applied: number; suggested: number; file?: string };
   steps: StepResult[];
@@ -112,6 +122,10 @@ export async function loadTask(file: string): Promise<{ task: Task; baseDir: str
  * marked skipped. Writes result.json and report.html to the artifacts directory.
  */
 export async function runTask(definition: Task, options: RunTaskOptions): Promise<TaskResult> {
+  // Privacy mode covers the whole run: every model request inside it is refused.
+  if ((options.private || definition.private) && !isPrivate()) {
+    return withPrivacy(() => runTask(definition, options));
+  }
   // Unknown or missing params fail before anything launches.
   const task = bindParams(definition, options.params);
   const artifactsDir = path.resolve(options.artifactsDir);
@@ -127,11 +141,12 @@ export async function runTask(definition: Task, options: RunTaskOptions): Promis
   const context = isolate ? await browser.newContext() : undefined;
   const steps: StepResult[] = [];
   let first: NexusPage | undefined;
+  let run: StepExecutor | undefined;
 
   try {
     first = context ? await context.newPage() : await browser.newPage();
     first.defaultTimeoutMs = defaultTimeoutMs;
-    const run = new StepExecutor(first, baseDir, artifactsDir);
+    run = new StepExecutor(first, baseDir, artifactsDir);
     let failed = false;
 
     for (const [index, step] of task.steps.entries()) {
@@ -157,7 +172,8 @@ export async function runTask(definition: Task, options: RunTaskOptions): Promis
 
         const heal = options.heal;
         if (heal && isRepairable(error) && stepTarget(step)) {
-          const repair = await findRepair(run.page, step, error, heal, {
+          const repairWith = isDesktopStep(step) ? findDesktopRepair.bind(null, await run.desktop()) : findRepair.bind(null, run.page);
+          const repair = await repairWith(step, error, heal, {
             task: task.name,
             stepIndex: index,
             step: rawStep(options.source, index) ?? { [step.action]: stepTarget(step) },
@@ -180,14 +196,13 @@ export async function runTask(definition: Task, options: RunTaskOptions): Promis
         }
       }
       result.durationMs = Date.now() - started;
-      result.observation = await observe(run.page);
+      result.observation = await run.observe();
 
       const wantShot = policy === 'every-step' || (policy === 'on-failure' && result.status === 'failed');
       if (wantShot && !result.screenshot) {
         const file = `step-${String(index + 1).padStart(2, '0')}-${step.action}.png`;
         try {
-          await run.page.screenshot({ path: path.join(artifactsDir, file) });
-          result.screenshot = file;
+          if (await run.screenshot(path.join(artifactsDir, file))) result.screenshot = file;
         } catch {
           // A failed screenshot must not mask the step's own outcome.
         }
@@ -196,6 +211,7 @@ export async function runTask(definition: Task, options: RunTaskOptions): Promis
       options.onStepEnd?.(result);
     }
   } finally {
+    await run?.close();
     if (context) await context.close().catch(() => {});
     else await first?.close().catch(() => {}); // Leave the profile's cookies and storage in place.
     if (ownsBrowser) await browser.close();
@@ -211,6 +227,7 @@ export async function runTask(definition: Task, options: RunTaskOptions): Promis
     artifactsDir,
     ...(declared.length > 0 ? { params: resolvedParams(definition, options.params) } : {}),
     ...(repairs ? { repairs } : {}),
+    ...(isPrivate() ? { private: true } : {}),
     steps,
   };
   await writeFile(path.join(artifactsDir, 'result.json'), `${JSON.stringify(result, null, 2)}\n`);
@@ -231,10 +248,64 @@ export class StepExecutor {
   /** Per page: how many dialogs expectDialog has already consumed. */
   readonly #dialogCursor = new WeakMap<NexusPage, number>();
 
+  /** Started on the first desktop step. */
+  #desktop: Promise<MacDesktop> | undefined;
+  /** The app the last desktop step used, for observations and screenshots. */
+  #lastApp: string | undefined;
+  /** Whether the most recent step was a desktop step. */
+  lastWasDesktop = false;
+
   constructor(first: NexusPage, baseDir: string, artifactsDir: string) {
     this.#stack = [first];
     this.#baseDir = baseDir;
     this.#artifactsDir = artifactsDir;
+  }
+
+  /** The Mac desktop driver, started (and permission-checked) on first use. */
+  desktop(): Promise<MacDesktop> {
+    this.#desktop ??= MacDesktop.start().then(async (desktop) => {
+      await desktop.requirePermissions('accessibility');
+      return desktop;
+    });
+    return this.#desktop;
+  }
+
+  /** Releases the desktop helper, if one was started. */
+  async close(): Promise<void> {
+    if (!this.#desktop) return;
+    try {
+      (await this.#desktop).close();
+    } catch {
+      // It never started; nothing to close.
+    }
+  }
+
+  /** What the last step left on screen: the page, or the app's focused window. */
+  async observe(): Promise<StepResult['observation']> {
+    if (!this.lastWasDesktop || !this.#lastApp) return observe(this.page);
+    try {
+      const window = await (await this.desktop()).window(this.#lastApp);
+      return { url: `app:${window.name ?? this.#lastApp}`, title: window.title ?? '' };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Screenshot after a step: the page, or the whole screen after a desktop
+   * step. Desktop screenshots are skipped in privacy mode (they capture
+   * everything on screen) and when Screen Recording is not granted.
+   */
+  async screenshot(file: string): Promise<boolean> {
+    if (!this.lastWasDesktop) {
+      await this.page.screenshot({ path: file });
+      return true;
+    }
+    if (isPrivate()) return false;
+    const desktop = await this.desktop();
+    if (!(await desktop.permissions()).screenRecording) return false;
+    await desktop.screenshot(file);
+    return true;
   }
 
   /** The page steps currently act on: the most recent popup, else the first page. */
@@ -243,6 +314,8 @@ export class StepExecutor {
   }
 
   async execute(step: Step, timeoutMs: number): Promise<void> {
+    this.lastWasDesktop = isDesktopStep(step);
+    if (this.lastWasDesktop) return this.#executeDesktop(step, timeoutMs);
     const page = this.page;
     const at = (spec: TargetSpec) => toLocator(page, spec);
     const opts = { timeoutMs };
@@ -300,6 +373,59 @@ export class StepExecutor {
         await this.#stack.pop()!.close();
         return;
       }
+    }
+  }
+
+  async #executeDesktop(step: Step, timeoutMs: number): Promise<void> {
+    const desktop = await this.desktop();
+    const opts = { timeoutMs };
+    if (step.action === 'launch') {
+      await desktop.launch(step.app);
+      this.#lastApp = step.app;
+      return;
+    }
+    if (step.action === 'menu') {
+      this.#lastApp = step.app;
+      return desktop.menu(step.app, step.path);
+    }
+    const target = stepTarget(step)!;
+    this.#lastApp = target.app;
+    const at = desktop.locate(target);
+    switch (step.action) {
+      case 'click':
+        return at.click(opts);
+      case 'hover':
+        return at.hover(opts);
+      case 'type':
+        return at.type(step.text, opts);
+      case 'fill':
+        return at.fill(step.value, opts);
+      case 'press':
+        return at.key(step.key, opts);
+      case 'check':
+        return at.setChecked(true, opts);
+      case 'uncheck':
+        return at.setChecked(false, opts);
+      case 'select':
+        if (Array.isArray(step.option)) throw new ActionError('Desktop pop-up menus take one option');
+        return at.selectOption(step.option, opts);
+      case 'waitFor':
+        await at.resolve(opts);
+        return;
+      case 'expectVisible':
+        return verify(timeoutMs, `${at} to be visible`, async () => ((await at.isVisible()) ? true : 'not visible'));
+      case 'expectValue':
+        return verify(timeoutMs, `${at} to have value ${JSON.stringify(step.value)}`, async () => {
+          const value = await at.inputValue();
+          return value === step.value ? true : value === undefined ? 'no matching element' : JSON.stringify(value);
+        });
+      case 'expectElementText':
+        return verify(timeoutMs, `${at} to have text ${JSON.stringify(step.text)}`, async () => {
+          const text = await at.textContent();
+          return text !== undefined && textMatches(text, step.text, step.exact) ? true : text === undefined ? 'no matching element' : JSON.stringify(text);
+        });
+      default:
+        throw new ActionError(`"${step.action}" is not available for desktop targets`);
     }
   }
 
@@ -362,7 +488,9 @@ async function findRepair(
     notes.push(`rule: ${rule.reason}, but the new target ${why}`);
   }
 
-  if (heal.advisor) {
+  if (heal.advisor && isPrivate()) {
+    notes.push('AI not consulted: privacy mode is on');
+  } else if (heal.advisor) {
     const seen = await observe(page);
     try {
       const proposal = await heal.advisor.proposeTarget({
@@ -386,6 +514,77 @@ async function findRepair(
   return { applied: false, reason: notes.join('; ') || 'no clearly similar element on the page', from: broken };
 }
 
+/**
+ * Self-healing for a desktop target: the same-role element in the app with
+ * the clearly most similar name, else the advisor with an outline of the app
+ * (never in privacy mode). Proposals must match exactly one visible element.
+ */
+async function findDesktopRepair(
+  desktop: MacDesktop,
+  step: Step,
+  error: ElementNotFoundError | AmbiguousLocatorError,
+  heal: HealOptions,
+  context: Omit<RepairContext, 'outline' | 'url' | 'title' | 'screenshot'>,
+): Promise<StepRepair> {
+  const broken = stepTarget(step)!;
+  const notes: string[] = [];
+  let snapshot;
+  try {
+    snapshot = await desktop.snapshot(broken.app!);
+  } catch (snapshotError) {
+    return { applied: false, reason: `cannot inspect ${broken.app}: ${(snapshotError as Error).message}`, from: broken };
+  }
+  const verified = async (target: TargetSpec): Promise<string | undefined> => {
+    try {
+      const found = await desktop.locate(target).inspect();
+      if (!found) return 'matches no element';
+      return found.node.visible ? undefined : 'matches an element that is not visible';
+    } catch (verifyError) {
+      return verifyError instanceof AmbiguousLocatorError ? `matches ${verifyError.count} elements` : (verifyError as Error).message;
+    }
+  };
+
+  const wanted = broken.name ?? broken.text;
+  if (wanted && !(error instanceof AmbiguousLocatorError)) {
+    const ranked = snapshot.nodes
+      .filter((node) => node.visible && node.name && (!broken.role || node.role === broken.role))
+      .map((node) => ({ node, score: similarity(wanted, node.name) }))
+      .sort((a, b) => b.score - a.score);
+    const [best, second] = ranked;
+    if (best && best.score >= 0.6 && (!second || best.score - second.score >= 0.15)) {
+      const target = macTargetFor(snapshot, best.node, broken.app);
+      const why = await verified(target);
+      if (!why) {
+        return { applied: false, source: 'deterministic', reason: `"${wanted}" is gone; the closest ${best.node.role} is "${best.node.name}" (similarity ${best.score.toFixed(2)})`, from: broken, to: target };
+      }
+      notes.push(`rule: closest is "${best.node.name}", but it ${why}`);
+    }
+  }
+  if (error instanceof AmbiguousLocatorError && broken.role && broken.name && !broken.exact) {
+    const exact = { ...broken, exact: true };
+    if (!(await verified(exact))) return { applied: false, source: 'deterministic', reason: `several ${broken.role}s contain "${broken.name}"; exactly one has that exact name`, from: broken, to: exact };
+  }
+
+  if (heal.advisor && isPrivate()) {
+    notes.push('AI not consulted: privacy mode is on');
+  } else if (heal.advisor) {
+    try {
+      const proposal = await heal.advisor.proposeTarget({ ...context, url: `app:${broken.app}`, title: snapshot.app.name ?? '', outline: appOutline(snapshot) });
+      if (proposal.target) {
+        const target = { ...proposal.target, app: broken.app };
+        const why = await verified(target);
+        if (!why) return { applied: false, source: 'ai', reason: proposal.reason, from: broken, to: target };
+        notes.push(`AI proposed ${JSON.stringify(target)}, but it ${why}`);
+      } else {
+        notes.push(`AI: ${proposal.reason}`);
+      }
+    } catch (adviceError) {
+      notes.push(`AI: ${(adviceError as Error).message}`);
+    }
+  }
+  return { applied: false, reason: notes.join('; ') || 'no clearly similar element in the app', from: broken };
+}
+
 function rawStep(source: unknown, index: number): Record<string, unknown> | undefined {
   const steps = (source as { steps?: unknown[] } | undefined)?.steps;
   const step = Array.isArray(steps) ? steps[index] : undefined;
@@ -407,6 +606,28 @@ async function writeRepairedTask(steps: StepResult[], source: unknown, artifacts
   return { ...counts, file: 'task.repaired.json' };
 }
 
+/** e.g. `NexusFixture: button "Greet"`, `Notes: #title`, `Notes: focused element`. */
+function describeDesktopTarget(spec: TargetSpec): string {
+  const what = spec.id ? `#${spec.id}` : spec.role ? `${spec.role}${spec.name ? ` "${spec.name}"` : ''}` : spec.text ? `text "${spec.text}"` : 'focused element';
+  return `${spec.app}: ${what}${spec.nth !== undefined ? ` [${spec.nth}]` : ''}`;
+}
+
+function isDesktopStep(step: Step): boolean {
+  return step.action === 'launch' || step.action === 'menu' || stepTarget(step)?.app !== undefined;
+}
+
+/** Retries `check` until it returns true; otherwise fails with the last observation. */
+async function verify(timeoutMs: number, description: string, check: () => Promise<true | string>): Promise<void> {
+  let last = 'not observed';
+  const ok = await poll(async () => {
+    const result = await check();
+    if (result === true) return true;
+    last = result;
+    return undefined;
+  }, { timeoutMs, intervalMs: 200 });
+  if (!ok) throw new VerificationError(`Expected ${description}, but got ${last} after ${timeoutMs}ms`);
+}
+
 function resolvedParams(task: Task, values: Record<string, string> = {}): Record<string, string> {
   return Object.fromEntries(Object.entries(task.params ?? {}).map(([name, fallback]) => [name, values[name] ?? fallback ?? '']));
 }
@@ -420,7 +641,7 @@ export function resolveUrl(url: string, baseDir: string): string {
 }
 
 export function describeStep(step: Step, page: NexusPage): string {
-  const at = (spec: TargetSpec) => String(toLocator(page, spec));
+  const at = (spec: TargetSpec) => (spec.app ? describeDesktopTarget(spec) : String(toLocator(page, spec)));
   switch (step.action) {
     case 'goto':
       return `goto ${step.url}`;
@@ -461,6 +682,10 @@ export function describeStep(step: Step, page: NexusPage): string {
       return `expect a dialog saying ${JSON.stringify(step.text)}`;
     case 'closePopup':
       return 'close popup';
+    case 'launch':
+      return `open the ${step.app} app`;
+    case 'menu':
+      return `choose ${step.path.join(' → ')} in ${step.app}`;
   }
 }
 
