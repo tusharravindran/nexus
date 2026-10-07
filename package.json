@@ -1,6 +1,6 @@
 {
   "name": "nexus",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Deterministic browser automation runtime built directly on the Chrome DevTools Protocol",
   "private": true,
   "type": "module",
@@ -18,5 +18,8 @@
   "devDependencies": {
     "@types/node": "^22.20.5",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0"
   }
 }

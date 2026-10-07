@@ -1,0 +1,11 @@
+{
+  "name": "Greet anyone",
+  "description": "Parameterized greet: npm run nexus -- run examples/tasks/greet-anyone.json --param name=Grace",
+  "params": { "name": "Ada Lovelace" },
+  "steps": [
+    { "goto": "../../fixtures/form.html" },
+    { "fill": { "target": { "role": "textbox", "name": "Name" }, "value": "{{name}}" } },
+    { "press": { "target": { "role": "textbox", "name": "Name" }, "key": "Enter" } },
+    { "expectElementText": { "target": { "role": "status" }, "text": "Success: Hello, {{name}}", "exact": true } }
+  ]
+}

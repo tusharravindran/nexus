@@ -13,6 +13,12 @@ export interface DomNode {
   readonly index: number;
   /** CDP's stable node identity; valid for DOM/Input commands while the node lives. */
   readonly backendNodeId: number;
+  /**
+   * Which CDP session (renderer) the node lives in: '' for the page itself,
+   * otherwise an out-of-process iframe's session. backendNodeIds are only
+   * unique per renderer, so (owner, backendNodeId) identifies a node.
+   */
+  readonly owner: string;
   readonly nodeType: number;
   /** Lowercase tag name for elements, '#text' for text nodes, '#document' for documents. */
   readonly tagName: string;
@@ -38,6 +44,8 @@ export interface DomNode {
 /** Flat, serializable input for building a snapshot (from CDP or from tests). */
 export interface RawNode {
   backendNodeId: number;
+  /** Owning session key; '' (default) for the page's own renderer. */
+  owner?: string;
   nodeType: number;
   nodeName: string;
   nodeValue?: string;
@@ -99,9 +107,25 @@ export const SNAPSHOT_STYLES = ['visibility'] as const;
 
 const SKIPPED_TEXT_TAGS = new Set(['script', 'style', 'noscript', 'template', 'head']);
 
+/** A node identity that is unique across renderers. */
+export interface NodeRef {
+  owner: string;
+  backendNodeId: number;
+}
+
+/** One session's capture; `host` is the <iframe> element (in another session) it belongs under. */
+export interface SnapshotPart {
+  owner: string;
+  result: CdpCaptureSnapshotResult;
+  host?: NodeRef;
+}
+
+const refKey = (owner: string, backendNodeId: number): string => `${owner}\u0000${backendNodeId}`;
+
 interface MutableNode {
   index: number;
   backendNodeId: number;
+  owner: string;
   nodeType: number;
   tagName: string;
   attributes: Record<string, string>;
@@ -119,15 +143,16 @@ interface MutableNode {
 /**
  * A point-in-time copy of the page's DOM, with layout information.
  *
- * Built from a single DOMSnapshot.captureSnapshot call, which returns every
- * same-process frame's document plus bounding boxes and computed styles in
- * one round trip. Frames are stitched into one tree: an <iframe> element's
+ * Built from DOMSnapshot.captureSnapshot, which returns every frame document
+ * of one renderer plus bounding boxes and computed styles in one round trip.
+ * Captures from out-of-process iframes (separate sessions) are added as
+ * further parts. Frames are stitched into one tree: an <iframe> element's
  * child is its content document. Open and closed shadow-root content appears
  * as children of its host (user-agent shadow DOM is not included).
  */
 export class DomSnapshot {
   readonly nodes: readonly DomNode[];
-  readonly #byBackendId = new Map<number, DomNode>();
+  readonly #byRef = new Map<string, DomNode>();
   readonly #textCache = new Map<DomNode, string>();
   readonly #visibleTextCache = new Map<DomNode, string>();
 
@@ -135,6 +160,7 @@ export class DomSnapshot {
     const built: MutableNode[] = raw.map((node) => ({
       index: -1,
       backendNodeId: node.backendNodeId,
+      owner: node.owner ?? '',
       nodeType: node.nodeType,
       tagName: node.nodeName.toLowerCase(),
       attributes: node.attributes ?? {},
@@ -176,78 +202,38 @@ export class DomSnapshot {
     }
 
     this.nodes = ordered;
-    for (const node of ordered) this.#byBackendId.set(node.backendNodeId, node);
+    for (const node of ordered) this.#byRef.set(refKey(node.owner, node.backendNodeId), node);
   }
 
-  /** Parses every document in the capture and stitches iframe documents under their <iframe> elements. */
+  /** Parses a single-session capture, stitching same-process iframe documents under their <iframe> elements. */
   static fromCdp(result: CdpCaptureSnapshotResult): DomSnapshot {
-    const { strings, documents } = result;
-    const str = (index: number | undefined): string =>
-      index === undefined || index < 0 ? '' : (strings[index] ?? '');
+    return DomSnapshot.fromCdpParts([{ owner: '', result }]);
+  }
 
-    // Global index of each document's first node, so per-document indices can be offset.
-    const offsets: number[] = [];
-    let total = 0;
-    for (const document of documents) {
-      offsets.push(total);
-      total += document.nodes.backendNodeId?.length ?? 0;
-    }
-
-    // Which global node hosts each document (only iframes' content documents have one).
-    const hostOfDocument = new Map<number, number>();
-    documents.forEach((document, d) => {
-      const links = document.nodes.contentDocumentIndex;
-      links?.index.forEach((nodeIndex, i) => hostOfDocument.set(links.value[i]!, offsets[d]! + nodeIndex));
-    });
-
+  /**
+   * Combines captures from several sessions. Parts must be ordered so that a
+   * part's `host` element appears in an earlier part. A part whose host is
+   * missing (e.g. the iframe was removed mid-capture) is dropped.
+   */
+  static fromCdpParts(parts: readonly SnapshotPart[]): DomSnapshot {
     const raw: RawNode[] = [];
-    documents.forEach((document, d) => {
-      const { nodes, layout } = document;
-      const offset = offsets[d]!;
-      const frameId = str(document.frameId);
-      const count = nodes.backendNodeId?.length ?? 0;
-
-      const layoutByNode = new Map<number, { bounds: number[]; styles: number[] }>();
-      layout.nodeIndex.forEach((nodeIndex, i) => {
-        // A node can own several layout objects (e.g. wrapped text); the first one wins.
-        if (!layoutByNode.has(nodeIndex)) {
-          layoutByNode.set(nodeIndex, { bounds: layout.bounds[i] ?? [], styles: layout.styles[i] ?? [] });
-        }
-      });
-      const inputValues = new Map<number, string>();
-      nodes.inputValue?.index.forEach((nodeIndex, i) => inputValues.set(nodeIndex, str(nodes.inputValue!.value[i])));
-      const checked = new Set(nodes.inputChecked?.index ?? []);
-      const selected = new Set(nodes.optionSelected?.index ?? []);
-
-      for (let i = 0; i < count; i++) {
-        const attributes: Record<string, string> = {};
-        const pairs = nodes.attributes?.[i] ?? [];
-        for (let a = 0; a + 1 < pairs.length; a += 2) attributes[str(pairs[a])] = str(pairs[a + 1]);
-
-        const parent = nodes.parentIndex?.[i] ?? -1;
-        const box = layoutByNode.get(i);
-        const [x = 0, y = 0, width = 0, height = 0] = box?.bounds ?? [];
-        raw.push({
-          backendNodeId: nodes.backendNodeId![i]!,
-          nodeType: nodes.nodeType?.[i] ?? 0,
-          nodeName: str(nodes.nodeName?.[i]),
-          nodeValue: str(nodes.nodeValue?.[i]),
-          attributes,
-          inputValue: inputValues.get(i),
-          checked: checked.has(i),
-          selected: selected.has(i),
-          frameId,
-          parentIndex: parent >= 0 ? offset + parent : (hostOfDocument.get(d) ?? -1),
-          bounds: box ? { x, y, width, height } : undefined,
-          visibility: box ? str(box.styles[SNAPSHOT_STYLES.indexOf('visibility')]) : undefined,
-        });
+    const indexByRef = new Map<string, number>();
+    for (const part of parts) {
+      let hostIndex = -1;
+      if (part.host) {
+        const found = indexByRef.get(refKey(part.host.owner, part.host.backendNodeId));
+        if (found === undefined) continue;
+        hostIndex = found;
       }
-    });
+      const start = raw.length;
+      appendCapture(raw, part, hostIndex);
+      for (let i = start; i < raw.length; i++) indexByRef.set(refKey(part.owner, raw[i]!.backendNodeId), i);
+    }
     return new DomSnapshot(raw);
   }
 
-  get(backendNodeId: number): DomNode | undefined {
-    return this.#byBackendId.get(backendNodeId);
+  get(backendNodeId: number, owner = ''): DomNode | undefined {
+    return this.#byRef.get(refKey(owner, backendNodeId));
   }
 
   /** All element nodes, in document order. */
@@ -296,6 +282,73 @@ export class DomSnapshot {
     const preview = text ? ` "${text.length > 40 ? `${text.slice(0, 40)}…` : text}"` : '';
     return `<${node.tagName}${id}${classes}>${preview}`;
   }
+}
+
+/** Appends one session's documents to `raw`; documents with no in-capture host hang off `hostIndex`. */
+function appendCapture(raw: RawNode[], part: SnapshotPart, hostIndex: number): void {
+  const { strings, documents } = part.result;
+  const str = (index: number | undefined): string =>
+    index === undefined || index < 0 ? '' : (strings[index] ?? '');
+
+  // Global index of each document's first node, so per-document indices can be offset.
+  const base = raw.length;
+  const offsets: number[] = [];
+  let total = base;
+  for (const document of documents) {
+    offsets.push(total);
+    total += document.nodes.backendNodeId?.length ?? 0;
+  }
+
+  // Which global node hosts each document (same-process iframes' content documents).
+  const hostOfDocument = new Map<number, number>();
+  documents.forEach((document, d) => {
+    const links = document.nodes.contentDocumentIndex;
+    links?.index.forEach((nodeIndex, i) => hostOfDocument.set(links.value[i]!, offsets[d]! + nodeIndex));
+  });
+
+  documents.forEach((document, d) => {
+    const { nodes, layout } = document;
+    const offset = offsets[d]!;
+    const frameId = str(document.frameId);
+    const count = nodes.backendNodeId?.length ?? 0;
+
+    const layoutByNode = new Map<number, { bounds: number[]; styles: number[] }>();
+    layout.nodeIndex.forEach((nodeIndex, i) => {
+      // A node can own several layout objects (e.g. wrapped text); the first one wins.
+      if (!layoutByNode.has(nodeIndex)) {
+        layoutByNode.set(nodeIndex, { bounds: layout.bounds[i] ?? [], styles: layout.styles[i] ?? [] });
+      }
+    });
+    const inputValues = new Map<number, string>();
+    nodes.inputValue?.index.forEach((nodeIndex, i) => inputValues.set(nodeIndex, str(nodes.inputValue!.value[i])));
+    const checked = new Set(nodes.inputChecked?.index ?? []);
+    const selected = new Set(nodes.optionSelected?.index ?? []);
+
+    for (let i = 0; i < count; i++) {
+      const attributes: Record<string, string> = {};
+      const pairs = nodes.attributes?.[i] ?? [];
+      for (let a = 0; a + 1 < pairs.length; a += 2) attributes[str(pairs[a])] = str(pairs[a + 1]);
+
+      const parent = nodes.parentIndex?.[i] ?? -1;
+      const box = layoutByNode.get(i);
+      const [x = 0, y = 0, width = 0, height = 0] = box?.bounds ?? [];
+      raw.push({
+        backendNodeId: nodes.backendNodeId![i]!,
+        owner: part.owner,
+        nodeType: nodes.nodeType?.[i] ?? 0,
+        nodeName: str(nodes.nodeName?.[i]),
+        nodeValue: str(nodes.nodeValue?.[i]),
+        attributes,
+        inputValue: inputValues.get(i),
+        checked: checked.has(i),
+        selected: selected.has(i),
+        frameId,
+        parentIndex: parent >= 0 ? offset + parent : (hostOfDocument.get(d) ?? hostIndex),
+        bounds: box ? { x, y, width, height } : undefined,
+        visibility: box ? str(box.styles[SNAPSHOT_STYLES.indexOf('visibility')]) : undefined,
+      });
+    }
+  });
 }
 
 export function normalizeWhitespace(text: string): string {

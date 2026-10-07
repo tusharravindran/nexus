@@ -1,0 +1,20 @@
+{
+  "name": "Dialogs popups uploads",
+  "description": "Answers a confirm and a prompt, works in a popup window, and uploads a file.",
+  "steps": [
+    { "goto": "../../fixtures/pages.html" },
+    { "onDialog": "accept" },
+    { "click": { "role": "button", "name": "Delete account" } },
+    { "expectDialog": "Really delete?" },
+    { "expectElementText": { "target": { "css": "#dialog-output" }, "text": "Account deleted" } },
+    { "onDialog": { "accept": "Quarterly report" } },
+    { "click": { "role": "button", "name": "Rename" } },
+    { "expectText": "Renamed to Quarterly report" },
+    { "click": { "role": "button", "name": "Open window" }, "opensPopup": true },
+    { "click": { "role": "button", "name": "Child button" } },
+    { "expectText": "Child clicked" },
+    { "closePopup": true },
+    { "upload": { "target": { "css": "#avatar" }, "files": "../../fixtures/next.html" } },
+    { "expectText": "avatar: next.html" }
+  ]
+}

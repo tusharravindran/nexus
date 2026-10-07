@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { TaskValidationError } from '../../src/errors.ts';
 import { resolveUrl } from '../../src/task/runner.ts';
-import { parseTask } from '../../src/task/schema.ts';
+import { bindParams, parseTask } from '../../src/task/schema.ts';
 
 function issuesOf(input: unknown): string[] {
   try {
@@ -45,6 +45,7 @@ describe('parseTask', () => {
       action: 'click',
       target: { role: 'button', name: 'Go', exact: true },
       waitForNavigation: true,
+      opensPopup: false,
       name: 'submit',
       timeoutMs: 500,
     });
@@ -62,6 +63,7 @@ describe('parseTask', () => {
       action: 'click',
       target: { role: 'button', name: 'Pay', nth: 0, within: { css: 'iframe#payment' } },
       waitForNavigation: false,
+      opensPopup: false,
     });
   });
 
@@ -110,5 +112,81 @@ describe('resolveUrl', () => {
     assert.equal(resolveUrl('https://example.com/a', '/tmp'), 'https://example.com/a');
     assert.equal(resolveUrl('about:blank', '/tmp'), 'about:blank');
     assert.equal(resolveUrl('../fixtures/form.html', '/work/tasks'), 'file:///work/fixtures/form.html');
+  });
+});
+
+describe('task params', () => {
+  const task = () =>
+    parseTask({
+      name: 'Search',
+      params: { query: 'pizza', city: null },
+      steps: [
+        { goto: 'https://example.test/?q={{query}}' },
+        { fill: { target: { role: 'textbox', name: 'City' }, value: '{{ city }}' } },
+        { expectText: 'Results for {{query}} in {{city}}' },
+      ],
+    });
+
+  it('substitutes values, falling back to defaults', () => {
+    const bound = bindParams(task(), { city: 'Oslo' });
+    assert.deepEqual(bound.steps[0], { action: 'goto', url: 'https://example.test/?q=pizza' });
+    assert.deepEqual(bound.steps[1], { action: 'fill', target: { role: 'textbox', name: 'City' }, value: 'Oslo' });
+    assert.deepEqual(bound.steps[2], { action: 'expectText', text: 'Results for pizza in Oslo', exact: false });
+    const overridden = bindParams(task(), { city: 'Oslo', query: 'sushi' }).steps[0] as { url: string };
+    assert.equal(overridden.url, 'https://example.test/?q=sushi');
+  });
+
+  it('rejects missing required and undeclared values', () => {
+    assert.throws(() => bindParams(task(), {}), /param "city": required/);
+    assert.throws(() => bindParams(task(), { city: 'Oslo', color: 'red' }), /param "color": not declared/);
+  });
+
+  it('reports placeholders that are not declared, and bad declarations', () => {
+    const issues = issuesOf({
+      name: 'Bad params',
+      params: { '1st': 'x', ok: 5 },
+      steps: [{ goto: '{{missing}}' }, { type: { target: { css: '#a' }, text: 'hi {{other}}' } }],
+    });
+    assert.ok(issues.some((i) => /^task\.params\.1st: names must be/.test(i)));
+    assert.ok(issues.some((i) => /^task\.params\.ok: default must be a string or null/.test(i)));
+    assert.ok(issues.some((i) => /^steps\[0\]\.goto: uses undeclared parameter \{\{missing\}\}/.test(i)));
+    assert.ok(issues.some((i) => /^steps\[1\]\.type\.text: uses undeclared parameter \{\{other\}\}/.test(i)));
+  });
+});
+
+describe('dialog, popup and upload steps', () => {
+  it('parses them', () => {
+    const task = parseTask({
+      name: 'Pages',
+      steps: [
+        { onDialog: 'accept' },
+        { onDialog: { accept: 'answer' } },
+        { expectDialog: 'Sure?' },
+        { click: { role: 'link', name: 'Help' }, opensPopup: true },
+        { closePopup: true },
+        { upload: { target: { css: '#file' }, files: 'a.pdf' } },
+        { upload: { target: { css: '#files' }, files: ['a.pdf', 'b.pdf'] } },
+      ],
+    });
+    assert.deepEqual(task.steps.map((s) => s.action), ['onDialog', 'onDialog', 'expectDialog', 'click', 'closePopup', 'upload', 'upload']);
+    assert.deepEqual(task.steps[1], { action: 'onDialog', policy: { accept: 'answer' } });
+    assert.equal((task.steps[3] as { opensPopup: boolean }).opensPopup, true);
+    assert.deepEqual((task.steps[5] as { files: string[] }).files, ['a.pdf']);
+  });
+
+  it('validates them', () => {
+    const issues = issuesOf({
+      name: 'Bad',
+      steps: [
+        { onDialog: 'maybe' },
+        { closePopup: false },
+        { upload: { target: { css: '#f' }, files: [] } },
+        { hover: { css: '#a' }, opensPopup: true },
+      ],
+    });
+    assert.ok(issues.some((i) => /^steps\[0\]\.onDialog: must be "accept", "dismiss"/.test(i)));
+    assert.ok(issues.some((i) => /^steps\[1\]\.closePopup: must be true/.test(i)));
+    assert.ok(issues.some((i) => /^steps\[2\]\.upload\.files: must be a file path/.test(i)));
+    assert.ok(issues.some((i) => /^steps\[3\]\.opensPopup: only allowed on click and press/.test(i)));
   });
 });

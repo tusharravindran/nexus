@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { ActionError, ElementCoveredError, ProtocolError } from '../errors.ts';
 import { normalizeWhitespace, type DomNode, type DomSnapshot } from '../dom/snapshot.ts';
 import { keyDefinition, parseChord, pressChord, pressKey, type CommandSender } from '../input/keyboard.ts';
@@ -5,6 +7,41 @@ import { clickAt, moveTo } from '../input/mouse.ts';
 
 const EDITABLE_INPUT_TYPES = new Set(['', 'text', 'search', 'email', 'password', 'tel', 'url', 'number']);
 const DISABLEABLE_TAGS = new Set(['button', 'input', 'select', 'textarea', 'option', 'fieldset']);
+
+/** One out-of-process iframe boundary between the page and a node. */
+export interface FrameHop {
+  /** Session containing the <iframe> element. */
+  parentOwner: string;
+  /** backendNodeId of the <iframe> element in `parentOwner`. */
+  host: number;
+  /** Top-left of the iframe's content box, in page-viewport coordinates. */
+  contentOffset: { x: number; y: number };
+}
+
+/** What an ElementHandle needs from its page. */
+export interface ElementHost {
+  /** The page session. Input events always go here, in page-viewport coordinates. */
+  readonly session: CommandSender;
+  /** Session owning nodes with this `owner` (DOM commands go there). Default: `session`. */
+  sessionFor?(owner: string): CommandSender;
+  /**
+   * For a node inside out-of-process iframes: scrolls each enclosing <iframe>
+   * into view and returns the hops, outermost first. Empty for the page itself.
+   */
+  framePath?(owner: string): Promise<FrameHop[]>;
+  /**
+   * Makes the page the active tab. Chromium does not process input for
+   * background tabs, so this runs before any input is sent.
+   */
+  activate?(): Promise<void>;
+  /**
+   * Resolves after the page has produced a new compositor frame. The browser
+   * routes pointer input to out-of-process iframes using hit-test data that
+   * is only refreshed by a frame, so input right after a scroll can go to
+   * the wrong frame.
+   */
+  nextFrame?(): Promise<void>;
+}
 
 /** True if the element is a form control with the `disabled` attribute. */
 export function isDisabled(node: DomNode): boolean {
@@ -60,11 +97,17 @@ export type OptionSpec = string | { value: string } | { label: string };
  */
 export class ElementHandle {
   readonly node: DomNode;
+  readonly #host: ElementHost;
+  /** DOM commands: the session that owns this node. */
   readonly #session: CommandSender;
+  /** Input events: always the page session. */
+  readonly #input: CommandSender;
   readonly #snapshot: DomSnapshot;
 
-  constructor(session: CommandSender, snapshot: DomSnapshot, node: DomNode) {
-    this.#session = session;
+  constructor(host: ElementHost, snapshot: DomSnapshot, node: DomNode) {
+    this.#host = host;
+    this.#session = host.sessionFor?.(node.owner) ?? host.session;
+    this.#input = host.session;
     this.#snapshot = snapshot;
     this.node = node;
   }
@@ -78,21 +121,42 @@ export class ElementHandle {
   }
 
   async click(): Promise<void> {
+    await this.#host.activate?.();
     const { x, y } = await this.#pointerTarget();
-    await clickAt(this.#session, x, y);
+    await clickAt(this.#input, x, y);
   }
 
   async hover(): Promise<void> {
+    await this.#host.activate?.();
     const { x, y } = await this.#pointerTarget();
-    await moveTo(this.#session, x, y);
+    await moveTo(this.#input, x, y);
   }
 
   async focus(): Promise<void> {
+    await this.#host.activate?.();
     try {
       await this.#session.send('DOM.focus', { backendNodeId: this.backendNodeId });
     } catch (error) {
       if (error instanceof ProtocolError) throw new ActionError(`Cannot focus ${this.describe()}: ${error.message}`);
       throw error;
+    }
+    if (this.node.owner !== '') await this.#awaitFrameFocus();
+  }
+
+  /**
+   * Key events go to whichever frame the *browser* considers focused. Focusing
+   * inside an out-of-process iframe updates that asynchronously, so wait until
+   * the frame reports focus before any key is sent.
+   */
+  async #awaitFrameFocus(): Promise<void> {
+    const deadline = Date.now() + 1_000;
+    while (Date.now() < deadline) {
+      const { result } = await this.#session.send<{ result?: { value?: boolean } }>('Runtime.evaluate', {
+        expression: 'document.hasFocus()',
+        returnByValue: true,
+      });
+      if (result?.value === true) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
 
@@ -107,8 +171,8 @@ export class ElementHandle {
   async fill(value: string): Promise<void> {
     this.#assertEditable('fill');
     await this.focus();
-    await pressChord(this.#session, parseChord('ControlOrMeta+a')!);
-    if (value === '') await pressKey(this.#session, keyDefinition('Delete')!);
+    await pressChord(this.#input, parseChord('ControlOrMeta+a')!);
+    if (value === '') await pressKey(this.#input, keyDefinition('Delete')!);
     else await this.#typeCharacters(value);
   }
 
@@ -117,7 +181,7 @@ export class ElementHandle {
     const chord = parseChord(key);
     if (!chord) throw new ActionError(`Unknown key "${key}"`);
     await this.focus();
-    await pressChord(this.#session, chord);
+    await pressChord(this.#input, chord);
   }
 
   /**
@@ -164,7 +228,25 @@ export class ElementHandle {
     return indices.map((index) => available[index]!.value);
   }
 
-  /** Center of the element's first non-empty content quad, in viewport coordinates. */
+  /**
+   * Sets the files of an <input type="file"> (absolute or cwd-relative
+   * paths). Chromium fires `input` and `change` as for a user selection.
+   */
+  async setInputFiles(files: string[]): Promise<void> {
+    const type = (this.node.attributes.type ?? '').toLowerCase();
+    if (this.node.tagName !== 'input' || type !== 'file') {
+      throw new ActionError(`Cannot set files on ${this.describe()}: not an <input type="file">`);
+    }
+    if (files.length > 1 && !('multiple' in this.node.attributes)) {
+      throw new ActionError(`Cannot set ${files.length} files on ${this.describe()}: it does not accept multiple files`);
+    }
+    const absolute = files.map((file) => path.resolve(file));
+    const missing = absolute.filter((file) => !existsSync(file));
+    if (missing.length > 0) throw new ActionError(`Cannot upload missing file(s): ${missing.join(', ')}`);
+    await this.#session.send('DOM.setFileInputFiles', { files: absolute, backendNodeId: this.backendNodeId });
+  }
+
+  /** Center of the element's first non-empty content quad, in its own frame's viewport coordinates. */
   async clickablePoint(): Promise<{ x: number; y: number }> {
     let quads: number[][];
     try {
@@ -185,17 +267,63 @@ export class ElementHandle {
     throw new ActionError(`${this.describe()} has no clickable area`);
   }
 
-  /** Scrolls into view and returns a point that hits this element (not something covering it). */
+  /**
+   * Scrolls into view and returns a page-viewport point that hits this
+   * element. Inside out-of-process iframes, the point is hit-tested at every
+   * frame level, so an overlay over the <iframe> itself is also detected.
+   */
   async #pointerTarget(): Promise<{ x: number; y: number }> {
     await this.#session.send('DOM.scrollIntoViewIfNeeded', { backendNodeId: this.backendNodeId });
-    const point = await this.clickablePoint();
-    await this.#assertReceivesPointer(point.x, point.y);
+    const hops = this.node.owner && this.#host.framePath ? await this.#host.framePath(this.node.owner) : [];
+    if (hops.length > 0) await this.#host.nextFrame?.();
+    const local = await this.clickablePoint();
+    const offset = hops.at(-1)?.contentOffset ?? { x: 0, y: 0 };
+    const point = { x: local.x + offset.x, y: local.y + offset.y };
+
+    let parentOffset = { x: 0, y: 0 };
+    for (const hop of hops) {
+      const parent = this.#host.sessionFor?.(hop.parentOwner) ?? this.#host.session;
+      const hit = await this.#hitTest(parent, point.x - parentOffset.x, point.y - parentOffset.y);
+      if (hit !== hop.host) this.#throwCovered(hit, hop.parentOwner);
+      parentOffset = hop.contentOffset;
+    }
+    await this.#assertReceivesPointer(local.x, local.y);
     return point;
+  }
+
+  /**
+   * The node at a viewport point of `session`'s top document. Note:
+   * DOM.getNodeForLocation takes *document* coordinates, so the document's
+   * scroll offset is added to the viewport point.
+   */
+  async #hitTest(session: CommandSender, x: number, y: number): Promise<number> {
+    const { result } = await session.send<{ result?: { value?: [number, number] } }>('Runtime.evaluate', {
+      expression: '[scrollX, scrollY]',
+      returnByValue: true,
+    });
+    const [scrollX = 0, scrollY = 0] = result?.value ?? [];
+    try {
+      const { backendNodeId } = await session.send<{ backendNodeId: number }>('DOM.getNodeForLocation', {
+        x: Math.round(x + scrollX),
+        y: Math.round(y + scrollY),
+        includeUserAgentShadowDOM: false,
+      });
+      return backendNodeId;
+    } catch (error) {
+      if (error instanceof ProtocolError) throw new ElementCoveredError(`Cannot click ${this.describe()}: nothing receives input at its position`);
+      throw error;
+    }
+  }
+
+  #throwCovered(backendNodeId: number, owner: string): never {
+    const hit = this.#snapshot.get(backendNodeId, owner);
+    const blocker = hit ? this.#snapshot.describe(hit) : `an element that appeared after the snapshot (backendNodeId ${backendNodeId})`;
+    throw new ElementCoveredError(`Cannot click ${this.describe()}: it is covered by ${blocker}`);
   }
 
   async #typeCharacters(text: string): Promise<void> {
     for (const character of text) {
-      await pressKey(this.#session, character === '\n' ? keyDefinition('Enter')! : keyDefinition(character)!);
+      await pressKey(this.#input, character === '\n' ? keyDefinition('Enter')! : keyDefinition(character)!);
     }
   }
 
@@ -220,18 +348,13 @@ export class ElementHandle {
       });
   }
 
-  /** Fails if another element (e.g. an overlay) would receive a click at (x, y). */
+  /** Fails if another element (e.g. an overlay) would receive a click at (x, y) in this node's frame. */
   async #assertReceivesPointer(x: number, y: number): Promise<void> {
-    const { backendNodeId } = await this.#session.send<{ backendNodeId: number }>('DOM.getNodeForLocation', {
-      x: Math.round(x),
-      y: Math.round(y),
-      includeUserAgentShadowDOM: false,
-    });
+    const backendNodeId = await this.#hitTest(this.#session, x, y);
     if (backendNodeId === this.backendNodeId) return;
-    const hit = this.#snapshot.get(backendNodeId);
+    const hit = this.#snapshot.get(backendNodeId, this.node.owner);
     if (hit && this.#snapshot.contains(this.node, hit)) return;
-    const blocker = hit ? this.#snapshot.describe(hit) : `an element that appeared after the snapshot (backendNodeId ${backendNodeId})`;
-    throw new ElementCoveredError(`Cannot click ${this.describe()}: it is covered by ${blocker}`);
+    this.#throwCovered(backendNodeId, this.node.owner);
   }
 }
 

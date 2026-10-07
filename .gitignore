@@ -1,2 +1,7 @@
 node_modules/
 artifacts/
+# Local secrets (API keys). Never commit: this repository is public.
+.env
+# Your own recorded and drafted tasks (may contain company URLs and data). This repository is public.
+recordings/
+drafts/

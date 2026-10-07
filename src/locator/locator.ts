@@ -1,8 +1,7 @@
-import { ElementHandle, formValue, isCheckable, isChecked, isDisabled, type OptionSpec } from '../element/element.ts';
+import { ElementHandle, formValue, isCheckable, isChecked, isDisabled, type ElementHost, type OptionSpec } from '../element/element.ts';
 import { AmbiguousLocatorError, ActionError, ElementCoveredError, ElementNotFoundError } from '../errors.ts';
 import { matchByRole, matchByText, type TextMatcher } from '../dom/match.ts';
-import type { DomNode, DomSnapshot } from '../dom/snapshot.ts';
-import type { CommandSender } from '../input/keyboard.ts';
+import type { DomNode, DomSnapshot, NodeRef } from '../dom/snapshot.ts';
 import { poll, sleep } from '../wait.ts';
 
 export type LocatorQuery =
@@ -11,12 +10,11 @@ export type LocatorQuery =
   | { kind: 'role'; role: string; name: TextMatcher | undefined; exact: boolean };
 
 /** What a Locator needs from a page. NexusPage implements it; unit tests fake it. */
-export interface LocatorHost {
-  readonly session: CommandSender;
+export interface LocatorHost extends ElementHost {
   readonly defaultTimeoutMs: number;
   snapshot(): Promise<DomSnapshot>;
-  /** backendNodeIds of elements matching a CSS selector, evaluated by the browser. */
-  querySelectorAll(selector: string): Promise<number[]>;
+  /** Elements matching a CSS selector, evaluated by the browser in every document and shadow root. */
+  querySelectorAll(selector: string): Promise<NodeRef[]>;
   /** Optional signal that the DOM changed, so waits can re-check immediately. */
   onDomChange?(listener: () => void): () => void;
 }
@@ -198,6 +196,15 @@ export class Locator {
     await this.#setChecked(false, options);
   }
 
+  /**
+   * Sets the files of an <input type="file">. File inputs are often hidden
+   * behind a styled button, so only presence is required, not visibility.
+   */
+  async setInputFiles(files: string | string[], options: TimeoutOptions = {}): Promise<void> {
+    const list = Array.isArray(files) ? files : [files];
+    await this.#act('set files on', () => undefined, options, (element) => element.setInputFiles(list));
+  }
+
   /** Selects <select> options by value or label. Returns the selected values. */
   async selectOption(option: OptionSpec | OptionSpec[], options: TimeoutOptions = {}): Promise<string[]> {
     let selected: string[] = [];
@@ -268,7 +275,7 @@ export class Locator {
         blockedBy = `${snapshot.describe(node)} ${problem}`;
         return undefined;
       }
-      return new ElementHandle(this.#host.session, snapshot, node);
+      return new ElementHandle(this.#host, snapshot, node);
     }, remainingMs);
 
     if (element) return element;
@@ -291,8 +298,9 @@ export class Locator {
     let matches: DomNode[];
     switch (q.kind) {
       case 'css': {
-        const ids = new Set(await this.#host.querySelectorAll(q.selector));
-        matches = snapshot.elements().filter((node) => ids.has(node.backendNodeId));
+        const refs = await this.#host.querySelectorAll(q.selector);
+        const wanted = new Set(refs.map((ref) => snapshot.get(ref.backendNodeId, ref.owner)));
+        matches = snapshot.elements().filter((node) => wanted.has(node));
         break;
       }
       case 'text':

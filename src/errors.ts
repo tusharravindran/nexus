@@ -71,3 +71,6 @@ export class TaskValidationError extends NexusError {
     this.issues = issues;
   }
 }
+
+/** Calling the model failed (credentials, rate limit, API error) or the model declined. */
+export class AiError extends NexusError {}

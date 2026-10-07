@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>NEXUS fixture: widget</title></head>
+  <body style="font-family: system-ui">
+    <label for="amount">Amount</label>
+    <input id="amount" />
+    <button id="confirm" type="button">Confirm amount</button>
+    <p id="widget-output"></p>
+    <p id="widget-events" hidden></p>
+    <script>
+      // Input events seen by this frame, for diagnosing cross-process input delivery.
+      for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'focus', 'blur']) {
+        addEventListener(type, (event) => {
+          const log = document.getElementById('widget-events');
+          log.textContent += `${type}:${event.target.id || event.target.nodeName} `;
+        }, true);
+      }
+      document.getElementById('confirm').addEventListener('click', (event) => {
+        document.getElementById('widget-output').textContent =
+          `Confirmed ${document.getElementById('amount').value} (trusted: ${event.isTrusted})`;
+      });
+    </script>
+  </body>
+</html>

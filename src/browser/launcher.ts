@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { LaunchError } from '../errors.ts';
@@ -14,6 +14,11 @@ export interface LaunchOptions {
   args?: string[];
   /** How long to wait for the DevTools endpoint to appear. Default: 30s. */
   timeoutMs?: number;
+  /**
+   * A persistent profile directory (logins, cookies, site data survive between
+   * launches). Default: a fresh temporary profile, deleted on close.
+   */
+  userDataDir?: string;
 }
 
 export interface LaunchedChromium {
@@ -70,7 +75,13 @@ export async function launchChromium(options: LaunchOptions = {}): Promise<Launc
   const headless = options.headless ?? true;
   const timeoutMs = options.timeoutMs ?? 30_000;
   // A fresh profile per launch: no cookies, extensions, or state leak between runs.
-  const userDataDir = await mkdtemp(path.join(os.tmpdir(), 'nexus-profile-'));
+  const persistent = options.userDataDir !== undefined;
+  const userDataDir = persistent ? path.resolve(options.userDataDir!) : await mkdtemp(path.join(os.tmpdir(), 'nexus-profile-'));
+  // Profiles hold login cookies: readable by the owner only.
+  if (persistent) {
+    await mkdir(userDataDir, { recursive: true, mode: 0o700 });
+    await preventSessionRestore(userDataDir);
+  }
 
   const args = [
     '--remote-debugging-port=0',
@@ -82,6 +93,15 @@ export async function launchChromium(options: LaunchOptions = {}): Promise<Launc
     '--disable-background-networking',
     '--disable-sync',
     '--mute-audio',
+    // Encrypt stored cookies with a fixed key instead of the OS keychain: no keychain
+    // prompt, and a persistent profile reads back the same way on every launch.
+    '--use-mock-keychain',
+    '--password-store=basic',
+    // Background tabs must keep processing input and timers: automation often
+    // continues on the opener while a popup or new tab is in front.
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
     '--window-size=1280,720',
     ...(headless ? ['--headless=new', '--hide-scrollbars'] : []),
     ...(options.args ?? []),
@@ -105,11 +125,11 @@ export async function launchChromium(options: LaunchOptions = {}): Promise<Launc
       await exited;
       clearTimeout(forced);
     }
-    await rm(userDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    if (!persistent) await rm(userDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   };
 
   try {
-    const wsEndpoint = await readDevToolsEndpoint(child, timeoutMs);
+    const wsEndpoint = await readDevToolsEndpoint(child, timeoutMs, persistent ? userDataDir : undefined);
     return { process: child, wsEndpoint, executablePath, kill };
   } catch (error) {
     await kill();
@@ -117,7 +137,19 @@ export async function launchChromium(options: LaunchOptions = {}): Promise<Launc
   }
 }
 
-function readDevToolsEndpoint(child: ChildProcess, timeoutMs: number): Promise<string> {
+/**
+ * A persistent profile would otherwise reopen the previous session's tabs at
+ * launch, and those pages would run again (re-submitting, re-sending...). The
+ * startup preference is signature-protected, so NEXUS removes the saved
+ * session itself. Cookies, storage and logins live in other files and stay.
+ */
+async function preventSessionRestore(userDataDir: string): Promise<void> {
+  const profile = path.join(userDataDir, 'Default');
+  const sessionFiles = ['Sessions', 'Current Session', 'Last Session', 'Current Tabs', 'Last Tabs'];
+  await Promise.all(sessionFiles.map((name) => rm(path.join(profile, name), { recursive: true, force: true })));
+}
+
+function readDevToolsEndpoint(child: ChildProcess, timeoutMs: number, profile: string | undefined): Promise<string> {
   return new Promise((resolve, reject) => {
     const stderr = child.stderr!;
     let output = '';
@@ -140,7 +172,9 @@ function readDevToolsEndpoint(child: ChildProcess, timeoutMs: number): Promise<s
     };
     const onExit = (code: number | null): void => {
       cleanup();
-      reject(new LaunchError(`Chromium exited (code ${code}) before exposing DevTools:\n${output.slice(-2000)}`));
+      // A locked profile makes Chromium hand off to the running instance and exit at once.
+      const hint = profile ? `\nIs the profile ${profile} already open in another NEXUS run or browser window? A profile can only be used by one browser at a time.` : '';
+      reject(new LaunchError(`Chromium exited (code ${code}) before exposing DevTools:${hint}\n${output.slice(-2000)}`));
     };
     const onError = (error: Error): void => {
       cleanup();

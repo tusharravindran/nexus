@@ -27,11 +27,11 @@ interface StepOptions {
 export type Step = StepOptions &
   (
     | { action: 'goto'; url: string }
-    | { action: 'click'; target: TargetSpec; waitForNavigation: boolean }
+    | { action: 'click'; target: TargetSpec; waitForNavigation: boolean; opensPopup: boolean }
     | { action: 'hover'; target: TargetSpec }
     | { action: 'type'; target: TargetSpec; text: string }
     | { action: 'fill'; target: TargetSpec; value: string }
-    | { action: 'press'; target: TargetSpec; key: string; waitForNavigation: boolean }
+    | { action: 'press'; target: TargetSpec; key: string; waitForNavigation: boolean; opensPopup: boolean }
     | { action: 'check'; target: TargetSpec }
     | { action: 'uncheck'; target: TargetSpec }
     | { action: 'select'; target: TargetSpec; option: string | string[] }
@@ -43,6 +43,10 @@ export type Step = StepOptions &
     | { action: 'expectValue'; target: TargetSpec; value: string }
     | { action: 'expectElementText'; target: TargetSpec; text: string; exact: boolean }
     | { action: 'screenshot'; file: string }
+    | { action: 'upload'; target: TargetSpec; files: string[] }
+    | { action: 'onDialog'; policy: 'accept' | 'dismiss' | { accept: string } }
+    | { action: 'expectDialog'; text: string }
+    | { action: 'closePopup' }
   );
 
 export type StepAction = Step['action'];
@@ -50,15 +54,19 @@ export type StepAction = Step['action'];
 export interface Task {
   name: string;
   description?: string;
+  /** Declared `{{placeholders}}`: name → default value, or null if the value is required. */
+  params?: Record<string, string | null>;
   steps: Step[];
 }
 
 const ACTIONS: readonly StepAction[] = [
   'goto', 'click', 'hover', 'type', 'fill', 'press', 'check', 'uncheck', 'select',
   'waitFor', 'waitForNetworkIdle', 'wait', 'expectText', 'expectVisible', 'expectValue',
-  'expectElementText', 'screenshot',
+  'expectElementText', 'screenshot', 'upload', 'onDialog', 'expectDialog', 'closePopup',
 ];
-const STEP_OPTION_KEYS = new Set(['name', 'timeoutMs', 'waitForNavigation']);
+const STEP_OPTION_KEYS = new Set(['name', 'timeoutMs', 'waitForNavigation', 'opensPopup']);
+const PLACEHOLDER = /\{\{\s*([A-Za-z_][\w-]*)\s*\}\}/g;
+const PARAM_NAME = /^[A-Za-z_][\w-]*$/;
 const TARGET_KEYS = new Set(['css', 'text', 'role', 'name', 'exact', 'nth', 'within']);
 
 type Json = unknown;
@@ -89,8 +97,9 @@ export function parseTask(input: Json): Task {
   if (!isObject(input)) throw new TaskValidationError(['task: must be a JSON object']);
 
   for (const key of Object.keys(input)) {
-    if (!['name', 'description', 'steps'].includes(key)) issues.add('task', `unknown key "${key}"`);
+    if (!['name', 'description', 'params', 'steps'].includes(key)) issues.add('task', `unknown key "${key}"`);
   }
+  const params = parseParams(input.params, issues);
   const name = typeof input.name === 'string' && input.name.trim() ? input.name : undefined;
   if (!name) issues.add('task.name', 'must be a non-empty string');
   if (input.description !== undefined && typeof input.description !== 'string') {
@@ -104,11 +113,63 @@ export function parseTask(input: Json): Task {
     input.steps.forEach((raw, i) => {
       const step = parseStep(raw, `steps[${i}]`, issues);
       if (step) steps.push(step);
+      for (const [at, text] of strings(raw, `steps[${i}]`)) {
+        for (const [, param] of text.matchAll(PLACEHOLDER)) {
+          if (!params || !(param! in params)) issues.add(at, `uses undeclared parameter {{${param}}}; add it to "params"`);
+        }
+      }
     });
   }
 
   if (issues.list.length > 0) throw new TaskValidationError(issues.list);
-  return { name: name!, description: input.description as string | undefined, steps };
+  return { name: name!, description: input.description as string | undefined, ...(params ? { params } : {}), steps };
+}
+
+/**
+ * Substitutes `{{name}}` placeholders with `values` (falling back to each
+ * param's default). Throws TaskValidationError for unknown or missing values.
+ */
+export function bindParams(task: Task, values: Record<string, string> = {}): Task {
+  const declared = task.params ?? {};
+  const issues: string[] = [];
+  for (const name of Object.keys(values)) if (!(name in declared)) issues.push(`param "${name}": not declared by the task`);
+  const resolved: Record<string, string> = {};
+  for (const [name, fallback] of Object.entries(declared)) {
+    const value = values[name] ?? fallback;
+    if (value === null) issues.push(`param "${name}": required, pass --param ${name}=<value>`);
+    else resolved[name] = value;
+  }
+  if (issues.length > 0) throw new TaskValidationError(issues);
+
+  const substitute = (value: unknown): unknown => {
+    if (typeof value === 'string') return value.replace(PLACEHOLDER, (_, name: string) => resolved[name]!);
+    if (Array.isArray(value)) return value.map(substitute);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, substitute(v)]));
+    return value;
+  };
+  return { ...task, steps: task.steps.map((step) => substitute(step) as Step) };
+}
+
+function parseParams(value: Json, issues: Issues): Record<string, string | null> | undefined {
+  if (value === undefined) return undefined;
+  if (!isObject(value)) {
+    issues.add('task.params', 'must be an object of name → default string (or null when required)');
+    return undefined;
+  }
+  const params: Record<string, string | null> = {};
+  for (const [name, fallback] of Object.entries(value)) {
+    if (!PARAM_NAME.test(name)) issues.add(`task.params.${name}`, 'names must be letters, digits, _ or - (not starting with a digit)');
+    else if (fallback !== null && typeof fallback !== 'string') issues.add(`task.params.${name}`, 'default must be a string or null');
+    else params[name] = fallback;
+  }
+  return params;
+}
+
+/** Every string inside a JSON value, with its path. */
+function* strings(value: Json, at: string): Generator<[string, string]> {
+  if (typeof value === 'string') yield [at, value];
+  else if (Array.isArray(value)) for (const [i, item] of value.entries()) yield* strings(item, `${at}[${i}]`);
+  else if (isObject(value)) for (const [key, item] of Object.entries(value)) yield* strings(item, `${at}.${key}`);
 }
 
 function parseStep(raw: Json, path: string, issues: Issues): Step | undefined {
@@ -138,12 +199,15 @@ function parseStep(raw: Json, path: string, issues: Issues): Step | undefined {
     if (isNonNegativeNumber(raw.timeoutMs)) options.timeoutMs = raw.timeoutMs;
     else issues.add(`${path}.timeoutMs`, 'must be a non-negative number');
   }
-  let waitForNavigation = false;
-  if (raw.waitForNavigation !== undefined) {
-    if (action !== 'click' && action !== 'press') issues.add(`${path}.waitForNavigation`, 'only allowed on click and press');
-    else if (typeof raw.waitForNavigation !== 'boolean') issues.add(`${path}.waitForNavigation`, 'must be true or false');
-    else waitForNavigation = raw.waitForNavigation;
-  }
+  const actionFlag = (key: 'waitForNavigation' | 'opensPopup'): boolean => {
+    const flag = raw[key];
+    if (flag === undefined) return false;
+    if (action !== 'click' && action !== 'press') issues.add(`${path}.${key}`, 'only allowed on click and press');
+    else if (typeof flag !== 'boolean') issues.add(`${path}.${key}`, 'must be true or false');
+    return flag === true;
+  };
+  const waitForNavigation = actionFlag('waitForNavigation');
+  const opensPopup = actionFlag('opensPopup');
 
   const before = issues.list.length;
   let step: Step | undefined;
@@ -152,7 +216,7 @@ function parseStep(raw: Json, path: string, issues: Issues): Step | undefined {
       step = { action, url: string(value, at, issues) };
       break;
     case 'click':
-      step = { action, target: target(value, at, issues), waitForNavigation };
+      step = { action, target: target(value, at, issues), waitForNavigation, opensPopup };
       break;
     case 'hover':
     case 'check':
@@ -172,7 +236,7 @@ function parseStep(raw: Json, path: string, issues: Issues): Step | undefined {
     }
     case 'press': {
       const fields = object(value, at, issues, ['target', 'key']);
-      step = { action, target: target(fields.target, `${at}.target`, issues), key: string(fields.key, `${at}.key`, issues), waitForNavigation };
+      step = { action, target: target(fields.target, `${at}.target`, issues), key: string(fields.key, `${at}.key`, issues), waitForNavigation, opensPopup };
       break;
     }
     case 'select': {
@@ -239,6 +303,29 @@ function parseStep(raw: Json, path: string, issues: Issues): Step | undefined {
       step = { action, file };
       break;
     }
+    case 'upload': {
+      const fields = object(value, at, issues, ['target', 'files']);
+      const files = typeof fields.files === 'string' ? [fields.files] : fields.files;
+      const valid = Array.isArray(files) && files.length > 0 && files.every((file) => typeof file === 'string' && file !== '');
+      if (!valid) issues.add(`${at}.files`, 'must be a file path or a non-empty array of file paths');
+      step = { action, target: target(fields.target, `${at}.target`, issues), files: valid ? (files as string[]) : [] };
+      break;
+    }
+    case 'onDialog': {
+      let policy: 'accept' | 'dismiss' | { accept: string } = 'dismiss';
+      if (value === 'accept' || value === 'dismiss') policy = value;
+      else if (isObject(value) && Object.keys(value).length === 1 && typeof value.accept === 'string') policy = { accept: value.accept };
+      else issues.add(at, 'must be "accept", "dismiss", or { "accept": "prompt answer" }');
+      step = { action, policy };
+      break;
+    }
+    case 'expectDialog':
+      step = { action, text: string(value, at, issues) };
+      break;
+    case 'closePopup':
+      if (value !== true) issues.add(at, 'must be true');
+      step = { action };
+      break;
   }
   return issues.list.length === before ? { ...options, ...step! } : undefined;
 }
@@ -302,4 +389,38 @@ function boolean(value: Json, path: string, issues: Issues): boolean {
 
 function isNonNegativeNumber(value: Json): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+/** The element a step acts on or checks, if its action has one. */
+export function stepTarget(step: Step): TargetSpec | undefined {
+  return 'target' in step ? step.target : undefined;
+}
+
+/** A copy of `step` aimed at a different element. Steps without a target are returned unchanged. */
+export function withTarget(step: Step, target: TargetSpec): Step {
+  return 'target' in step ? ({ ...step, target } as Step) : step;
+}
+
+/** Validates a stand-alone target (e.g. one proposed by a model). Throws TaskValidationError. */
+export function parseTarget(value: unknown, path = 'target'): TargetSpec {
+  const issues = new Issues();
+  const spec = target(value, path, issues);
+  if (issues.list.length > 0) throw new TaskValidationError(issues.list);
+  return spec;
+}
+
+/** Actions whose task-file value *is* the target, rather than an object holding `target`. */
+const TARGET_VALUED = new Set<StepAction>(['click', 'hover', 'check', 'uncheck', 'expectVisible']);
+
+/**
+ * Returns a copy of a task-file step (JSON form) with its target replaced,
+ * keeping every other field as written. Steps without a target are returned as-is.
+ */
+export function replaceRawTarget(raw: Record<string, unknown>, replacement: TargetSpec): Record<string, unknown> {
+  const action = Object.keys(raw).find((key) => !STEP_OPTION_KEYS.has(key)) as StepAction | undefined;
+  if (!action) return raw;
+  if (TARGET_VALUED.has(action)) return { ...raw, [action]: replacement };
+  const value = raw[action];
+  if (isObject(value) && 'target' in value) return { ...raw, [action]: { ...value, target: replacement } };
+  return raw;
 }

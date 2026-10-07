@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>NEXUS fixture: dialogs, popups, uploads</title>
+  </head>
+  <body style="font-family: system-ui; margin: 40px">
+    <h1>Dialogs, popups and uploads</h1>
+
+    <section aria-label="Dialogs">
+      <button type="button" id="alert">Show alert</button>
+      <button type="button" id="confirm">Delete account</button>
+      <button type="button" id="prompt">Rename</button>
+      <p id="dialog-output"></p>
+    </section>
+
+    <section aria-label="Popups">
+      <a href="next.html" target="_blank" id="new-tab">Open in new tab</a>
+      <button type="button" id="window-open">Open window</button>
+    </section>
+
+    <section aria-label="Uploads">
+      <label for="avatar">Avatar</label>
+      <input type="file" id="avatar" />
+      <label for="attachments">Attachments</label>
+      <input type="file" id="attachments" multiple style="display: none" />
+      <p id="upload-output"></p>
+    </section>
+
+    <script>
+      const out = (id, text) => (document.getElementById(id).textContent = text);
+      document.getElementById('alert').onclick = () => { alert('Saved!'); out('dialog-output', 'alert closed'); };
+      document.getElementById('confirm').onclick = () => {
+        out('dialog-output', confirm('Really delete?') ? 'Account deleted' : 'Deletion cancelled');
+      };
+      document.getElementById('prompt').onclick = () => {
+        const name = prompt('New name?', 'untitled');
+        out('dialog-output', name === null ? 'Rename cancelled' : `Renamed to ${name}`);
+      };
+      document.getElementById('window-open').onclick = () => {
+        const popup = window.open('frame-child.html', 'child', 'width=400,height=300');
+        if (popup) popup.addEventListener('load', () => out('dialog-output', 'popup loaded'));
+      };
+      for (const id of ['avatar', 'attachments']) {
+        document.getElementById(id).addEventListener('change', (event) => {
+          const names = Array.from(event.target.files, (file) => `${file.name} (${file.size} bytes)`);
+          out('upload-output', `${id}: ${names.join(', ')} (trusted: ${event.isTrusted})`);
+        });
+      }
+    </script>
+  </body>
+</html>

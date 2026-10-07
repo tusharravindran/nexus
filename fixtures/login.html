@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>NEXUS fixture: login</title>
+  </head>
+  <body style="font-family: system-ui; margin: 40px">
+    <h1>Account</h1>
+    <p id="state"></p>
+    <label for="user">Username</label>
+    <input id="user" />
+    <button type="button" id="login">Log in</button>
+    <button type="button" id="logout">Log out</button>
+    <script>
+      const user = document.cookie.match(/(?:^|; )user=([^;]*)/)?.[1];
+      document.getElementById('state').textContent = user
+        ? `Welcome back, ${decodeURIComponent(user)} (visits: ${localStorage.getItem('visits') ?? 0})`
+        : 'Please log in';
+      if (user) localStorage.setItem('visits', String(Number(localStorage.getItem('visits') ?? 0) + 1));
+
+      document.getElementById('login').onclick = () => {
+        // A session cookie (no expiry), the kind browsers drop on exit.
+        document.cookie = `user=${encodeURIComponent(document.getElementById('user').value)}; path=/`;
+        document.getElementById('state').textContent = 'Logged in';
+      };
+      document.getElementById('logout').onclick = () => {
+        document.cookie = 'user=; path=/; max-age=0';
+        document.getElementById('state').textContent = 'Logged out';
+      };
+    </script>
+  </body>
+</html>

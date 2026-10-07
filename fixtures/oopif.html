@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>NEXUS fixture: cross-site iframe</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 40px; }
+      iframe { border: 1px solid #ccc; width: 460px; height: 140px; display: block; margin-top: 600px; }
+      .cover-wrap { position: relative; display: inline-block; }
+      .cover { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.2); }
+    </style>
+  </head>
+  <body>
+    <h1>Cross-site embed</h1>
+    <p>The frame below is served from a different site, so Chromium renders it in another process.</p>
+    <!-- src is filled in from ?other=<origin> so tests can pick the cross-site origin. -->
+    <iframe id="widget" title="Widget"></iframe>
+    <script>
+      const other = new URLSearchParams(location.search).get('other');
+      document.getElementById('widget').src = `${other}/widget.html`;
+    </script>
+  </body>
+</html>

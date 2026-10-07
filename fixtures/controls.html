@@ -51,6 +51,11 @@
       <p id="select-output"></p>
     </section>
 
+    <section aria-label="Toggle">
+      <button type="button" id="toggle" aria-expanded="false">Show details</button>
+      <p id="details" hidden>Here are the details.</p>
+    </section>
+
     <section aria-label="Transient overlay">
       <button type="button" id="arm">Arm overlay</button>
       <span class="cover-wrap">
@@ -79,6 +84,13 @@
           document.getElementById('select-output').textContent = `${id}: ${values.join(', ')}`;
         });
       }
+
+      document.getElementById('toggle').addEventListener('click', (event) => {
+        const open = event.currentTarget.getAttribute('aria-expanded') !== 'true';
+        event.currentTarget.setAttribute('aria-expanded', String(open));
+        event.currentTarget.textContent = open ? 'Hide details' : 'Show details';
+        document.getElementById('details').hidden = !open;
+      });
 
       document.getElementById('arm').addEventListener('click', () => {
         const overlay = document.getElementById('brief-overlay');

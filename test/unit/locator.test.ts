@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { DomSnapshot } from '../../src/dom/snapshot.ts';
+import { DomSnapshot, type NodeRef } from '../../src/dom/snapshot.ts';
 import { ActionError, AmbiguousLocatorError, ElementNotFoundError, ProtocolError } from '../../src/errors.ts';
 import { Locator, type LocatorHost, type LocatorQuery } from '../../src/locator/locator.ts';
 import { byId, h, snapshotOf } from '../helpers/dom.ts';
@@ -44,8 +44,8 @@ class FakePage implements LocatorHost {
     return this.current;
   }
 
-  async querySelectorAll(selector: string): Promise<number[]> {
-    return this.css[selector] ?? [];
+  async querySelectorAll(selector: string): Promise<NodeRef[]> {
+    return (this.css[selector] ?? []).map((backendNodeId) => ({ owner: '', backendNodeId }));
   }
 
   methods(): string[] {
@@ -130,6 +130,7 @@ describe('Locator actions', () => {
     assert.deepEqual(page.methods(), [
       'DOM.scrollIntoViewIfNeeded',
       'DOM.getContentQuads',
+      'Runtime.evaluate', // scroll offset: DOM.getNodeForLocation takes document coordinates
       'DOM.getNodeForLocation',
       'Input.dispatchMouseEvent',
       'Input.dispatchMouseEvent',
@@ -199,6 +200,16 @@ describe('Locator action errors', () => {
       return true;
     });
     assert.ok(!page.methods().includes('Input.dispatchMouseEvent'));
+  });
+
+  it('hit-tests in document coordinates by adding the scroll offset', async () => {
+    const page = new FakePage(snapshotOf(h('button', { id: 'b' }, 'Far')));
+    page.responders['Runtime.evaluate'] = () => ({ result: { value: [0, 1500] } });
+    await new Locator(page, role('button')).click();
+    const hit = page.calls.find((c) => c.method === 'DOM.getNodeForLocation')!;
+    const press = page.calls.find((c) => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mousePressed')!;
+    assert.deepEqual([hit.params.x, hit.params.y], [50, 1520]);
+    assert.deepEqual([press.params.x, press.params.y], [50, 20], 'input stays in viewport coordinates');
   });
 
   it('accepts a hit on a descendant of the target', async () => {

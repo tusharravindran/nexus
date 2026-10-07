@@ -35,7 +35,8 @@ class FakeSource implements NetworkEventSource {
 describe('NetworkTracker', () => {
   it('tracks requests until they finish or fail, counting redirects once', () => {
     const source = new FakeSource();
-    const tracker = new NetworkTracker(source);
+    const tracker = new NetworkTracker();
+    tracker.track(source);
     source.start('1');
     source.start('1', 'https://example.test/redirected'); // redirect reuses the id
     source.start('2');
@@ -47,7 +48,8 @@ describe('NetworkTracker', () => {
 
   it('resolves once the network has been quiet for idleMs', async () => {
     const source = new FakeSource();
-    const tracker = new NetworkTracker(source);
+    const tracker = new NetworkTracker();
+    tracker.track(source);
     source.start('1');
     const started = Date.now();
     const idle = tracker.waitForIdle({ idleMs: 40, timeoutMs: 2_000 });
@@ -58,7 +60,8 @@ describe('NetworkTracker', () => {
 
   it('restarts the quiet period when a new request starts', async () => {
     const source = new FakeSource();
-    const tracker = new NetworkTracker(source);
+    const tracker = new NetworkTracker();
+    tracker.track(source);
     const started = Date.now();
     const idle = tracker.waitForIdle({ idleMs: 50, timeoutMs: 2_000 });
     setTimeout(() => source.start('late'), 30);
@@ -69,14 +72,16 @@ describe('NetworkTracker', () => {
 
   it('allows maxInflight long-lived requests', async () => {
     const source = new FakeSource();
-    const tracker = new NetworkTracker(source);
+    const tracker = new NetworkTracker();
+    tracker.track(source);
     source.start('long-poll');
     await tracker.waitForIdle({ idleMs: 10, maxInflight: 1, timeoutMs: 500 });
   });
 
   it('times out naming the requests still in flight', async () => {
     const source = new FakeSource();
-    const tracker = new NetworkTracker(source);
+    const tracker = new NetworkTracker();
+    tracker.track(source);
     source.start('stuck', 'https://example.test/stuck');
     await assert.rejects(tracker.waitForIdle({ idleMs: 10, timeoutMs: 50 }), (error: unknown) => {
       assert.ok(error instanceof TimeoutError);
@@ -85,9 +90,38 @@ describe('NetworkTracker', () => {
     });
   });
 
+  it('tracks several sessions and forgets a detached one', async () => {
+    const page = new FakeSource();
+    const frame = new FakeSource();
+    const tracker = new NetworkTracker();
+    tracker.track(page);
+    const untrackFrame = tracker.track(frame, 'frame');
+    page.start('1.1');
+    frame.start('2.1'); // request ids carry the renderer's process id, so they are unique
+    assert.equal(tracker.inflight.length, 2);
+    page.finish('1.1');
+    assert.equal(tracker.inflight.length, 1);
+    untrackFrame();
+    assert.deepEqual(tracker.inflight, []);
+
+    // A frame's document request can start in the parent and finish in the frame's own process.
+    const child = new FakeSource();
+    tracker.track(child, 'child');
+    page.start('NAV-1');
+    child.finish('NAV-1');
+    assert.deepEqual(tracker.inflight, []);
+
+    // ...or finish before NEXUS attaches to that process: forget it by frame.
+    page.emit('Network.requestWillBeSent', { requestId: 'NAV-2', request: { url: 'https://other.test/' }, frameId: 'F2', type: 'Document' });
+    tracker.forgetFrameDocument('F2');
+    assert.deepEqual(tracker.inflight, []);
+    await tracker.waitForIdle({ idleMs: 5, timeoutMs: 200 });
+  });
+
   it('rejects on disconnect and stops listening after dispose', async () => {
     const source = new FakeSource();
-    const tracker = new NetworkTracker(source);
+    const tracker = new NetworkTracker();
+    tracker.track(source);
     source.start('1');
     const idle = tracker.waitForIdle({ timeoutMs: 1_000 });
     for (const handler of source.disconnects) handler('gone');

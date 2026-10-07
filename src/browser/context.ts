@@ -31,6 +31,11 @@ export class BrowserContext {
     return page;
   }
 
+  /** Registers a page created outside newPage() (e.g. a popup) as belonging to this context. */
+  adopt(page: NexusPage): void {
+    this.#pages.add(page);
+  }
+
   pages(): NexusPage[] {
     return [...this.#pages].filter((page) => !page.isClosed);
   }
